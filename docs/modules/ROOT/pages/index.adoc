@@ -1,0 +1,315 @@
+= Quarkus Shim
+
+Patch any Java class at *build time* — insert, wrap, or replace behavior in code you don't own.
+
+Shim is a Quarkus extension that weaves your patches into target classes during augmentation
+(via `BytecodeTransformerBuildItem` and ASM). Because everything happens at build time,
+patched classes work in JVM mode, dev mode (with live reload) and GraalVM native image alike —
+no Java agent, no runtime instrumentation.
+
+NOTE: "Shim" here means _modifying existing behavior_ in classes you cannot edit — not a
+JavaScript-style compatibility polyfill.
+
+The four kinds of hook:
+
+[cols="1,3"]
+|===
+| `@ShimBefore` | run code at method entry; may receive `self` and a prefix of the arguments
+| `@ShimAfter`  | run code before every normal return; may receive `self` and the returned value
+| `@ShimReplace`| replace the method body entirely
+| `@ShimAround` | wrap the method — call the original via `ShimCall`, transforming args/result
+|===
+
+== Installation
+
+Add the extension to your application:
+
+[source,xml,subs=attributes+]
+----
+<dependency>
+    <groupId>io.quarkiverse.shim</groupId>
+    <artifactId>quarkus-shim</artifactId>
+    <version>{project-version}</version>
+</dependency>
+----
+
+== Usage
+
+Declare a shim class annotated with `@Shim`, pointing at the class to patch. Static hook
+methods inside it describe the patches:
+
+[source,java]
+----
+@Shim(Greeter.class) // <1>
+public class GreeterShim {
+
+    @ShimReplace(method = "greet") // <2>
+    public static String greet(Greeter self, String name) {
+        return "Patched " + name;
+    }
+
+    @ShimReplace(method = "answer") // <3>
+    public static int answer() {
+        return 42;
+    }
+
+    @ShimBefore(method = "touch") // <4>
+    public static void beforeTouch(Greeter self) { /* ... */ }
+
+    @ShimAfter(method = "touch") // <5>
+    public static void afterTouch() { /* ... */ }
+}
+----
+<1> The class to patch. Use `@Shim(targetName = "com.acme.internal.Greeter")` when the class
+    is not visible from your code.
+<2> Replaces the whole method body. For instance methods the first parameter receives `this`;
+    remaining parameters and the return type must match the target method.
+<3> Replaces a static method: parameters match exactly.
+<4> Runs at method entry. Must be `static void`; may declare a single `self` parameter
+    (target type or `Object`) to receive the instance — allowed only on instance target
+    methods.
+<5> Runs before every normal return (not on exceptional exit).
+
+=== Arguments, return value, and ordering
+
+`@ShimBefore` may receive `self` (the target class or `Object`) followed by a prefix of the
+target's arguments; `@ShimAfter` may receive `self` and, as a trailing parameter, the value
+about to be returned:
+
+[source,java]
+----
+@ShimBefore(method = "process")
+public static void logInput(Pipeline self, String input) { ... }
+
+@ShimAfter(method = "process")
+public static void logOutput(Pipeline self, String returned) { ... }
+----
+
+When several hooks target one method, order them with `@ShimPriority` (lower runs first;
+before-hooks ascend at entry, after-hooks ascend before each return):
+
+[source,java]
+----
+@ShimBefore(method = "process") @ShimPriority(1)  public static void first() { ... }
+@ShimBefore(method = "process") @ShimPriority(10) public static void later() { ... }
+----
+
+=== Wrapping with `@ShimAround`
+
+`@ShimAround` is the most general hook: it runs in place of the target and calls the original
+through a `ShimCall`, so it can inspect, short-circuit, or transform the result.
+
+[source,java]
+----
+@ShimAround(method = "greet")
+public static String greet(ShimCall<String> original, Greeter self, String name) {
+    return original.proceed().toUpperCase();     // run the real greet(name), then transform
+}
+----
+
+For an instance target the hook takes `ShimCall`, then `self`, then the target's parameters;
+for a static target, `ShimCall` then the parameters. The `ShimCall` type argument is the
+target's boxed return type (`Void` for `void` methods). `@ShimAround` must be the only hook on
+a method and cannot target constructors.
+
+=== Selecting an overload
+
+When a method name is overloaded, pin the patch to one overload. Either give the JVM
+descriptor, or — more readably — the parameter types as class literals:
+
+[source,java]
+----
+@ShimReplace(method = "format", paramTypes = { int.class })                 // readable
+@ShimReplace(method = "format", descriptor = "(I)Ljava/lang/String;")       // equivalent
+----
+
+== Reaching private and package-private members
+
+=== Private fields and methods
+
+The JVM enforces private access even at the bytecode level, so hook bodies use the
+`ShimFields` / `ShimMethods` helpers (cached reflection; every `@Shim` target class is
+automatically registered for reflection, so this works in native image too):
+
+[source,java]
+----
+@ShimReplace(method = "greet")
+public static String greet(Greeter self, String name) {
+    int count = ShimFields.<Integer> get(self, "greetCount") + 1;   // private field read
+    ShimFields.set(self, "greetCount", count);                      // private field write
+    return ShimMethods.invoke(self, "decorate", "Patched " + name); // private method call
+}
+----
+
+Static members use `ShimFields.getStatic` / `setStatic` and `ShimMethods.invokeStatic`.
+
+=== Package-private classes and members: the same-package trick
+
+Declare the shim class in the _same package_ as the target. Application and dependency
+classes share the Quarkus ClassLoader, so they live in the same runtime package — the shim
+can then name package-private classes directly, call their package-private methods, and
+access `protected` members with plain compiled code (no reflection):
+
+[source,java]
+----
+package com.acme.internal;   // same package as the library internals
+
+@Shim(HiddenHelper.class)    // a package-private class — visible from here
+public class HiddenHelperShim {
+
+    @ShimReplace(method = "compute")
+    public static int compute(HiddenHelper self, int input) {
+        return self.packagePrivateMethod(input);   // direct call, no reflection
+    }
+}
+----
+
+=== Classes you cannot name at all
+
+For private nested classes and similar: target them with `@Shim(targetName = "...")` and type
+the `self` parameter as `Object` — combined with `ShimFields`/`ShimMethods` this covers
+classes that cannot appear in source.
+
+[IMPORTANT]
+====
+*Dev mode and the same-package trick.* Direct source-level access to a target's
+package-private/protected members works only when the shim and the target share a _runtime
+package_ (same classloader + package name). That always holds in JVM production, in native
+image, and for a shim patching another *application* class in dev mode. But dev mode loads
+application classes and dependency classes with *different* classloaders, so a shim (an
+application class) using the same-package trick to reach a *dependency's* package-private or
+protected member can fail with `IllegalAccessError` — in dev mode only.
+
+Everything else works identically across JVM, dev mode and native image: the transform itself,
+all hook kinds (including `@ShimAround`), `ShimFields`/`ShimMethods`, `definalize`, and
+`widenAccess`. So when the target is a *dependency* class and you need private/package-private
+access, prefer `ShimFields`/`ShimMethods` or `widenAccess` — neither depends on runtime-package
+identity — over the same-package trick.
+====
+
+=== Final fields
+
+Reading is unrestricted, but writing a `final` field via reflection is fragile (forbidden for
+`static final` and records, and the JDK is progressively restricting reflective final
+mutation). Since Shim already rewrites the target class, list the fields in `definalize` and
+the transformer strips their `final` modifier at build time — the write becomes an ordinary
+field write:
+
+[source,java]
+----
+@Shim(value = Widget.class, definalize = { "name" })
+public class WidgetShim {
+
+    @ShimAfter(method = "<init>")
+    public static void afterConstruct(Widget self) {
+        ShimFields.set(self, "name", "patched"); // 'name' is declared final on Widget
+    }
+}
+----
+
+Static _compile-time constants_ (`static final int X = 5`) cannot be definalized — javac
+inlines their value into every reader at compile time, so rewriting the field would not
+affect them; the build fails with an explanation instead.
+
+NOTE: Removing `final` forfeits the memory-model safe-publication guarantee for that field.
+This only matters for instances shared across threads via data races — which
+post-construction mutation compromises anyway.
+
+=== Widening a whole class
+
+`@Shim(widenAccess = true)` strips `private` and `final` from every declared member of the
+target (compile-time constants excepted), making them `public`. They can then be accessed
+reflectively *without* `setAccessible(true)` — handy as the JDK tightens `setAccessible` — and
+by separately-compiled same-package code. It is a coarse, whole-class alternative to
+`definalize`.
+
+NOTE: A shim's own source still cannot reference members that were `private` in the target's
+source — javac checks access before the transformation runs. Use `ShimFields`/`ShimMethods`
+for that (which then need no `setAccessible`).
+
+== Constructors and static initializers
+
+Constructors and static initializers are addressed by their JVM names:
+
+[source,java]
+----
+@Shim(Widget.class)
+public class WidgetShim {
+
+    @ShimBefore(method = "<init>")            // runs at entry, before super();
+    public static void beforeConstruct() { }  // no 'self' — 'this' is not initialized yet
+
+    @ShimAfter(method = "<init>")             // runs after construction, 'self' allowed
+    public static void afterConstruct(Widget self) {
+        ShimFields.set(self, "size", 99);     // fix up state the constructor got wrong
+    }
+
+    @ShimReplace(method = "<clinit>")         // replace the static initializer entirely
+    public static void staticInit() { }
+}
+----
+
+Rules, all enforced at build time:
+
+* `@ShimReplace(method = "<init>")` is rejected: the JVM requires every constructor to call
+  `super()`/`this()` before `this` can escape, so constructor bodies cannot be delegated.
+  Use `@ShimAfter` + `ShimFields` (and `definalize` for final fields) instead.
+* A constructor _before_-hook cannot receive `self` (uninitialized); an _after_-hook can.
+* Replacing `<clinit>` discards static field initializers written at the declaration site
+  too — they are part of `<clinit>` in bytecode. Set them from the hook
+  (e.g. `ShimFields.setStatic`) if needed.
+* With constructor chaining (`this(...)`), a hook woven into every overload fires once per
+  constructor body entered; pin one overload with `descriptor()` if that matters.
+
+== Diagnostics
+
+Shim logs every applied patch at build time and again, once, at application startup:
+
+[source]
+----
+Shim applied 3 patch(es):
+  - com.acme.Greeter#greet [around] <- com.acme.GreeterShim#greet
+  ...
+----
+
+In dev mode a *Dev UI* card ("Applied shims") lists the same information in a table.
+
+Set `quarkus.shim.dump-transformed-classes=true` to write a human-readable bytecode dump of
+each transformed target to `target/shim/<class>.txt` — useful for seeing exactly what was
+woven in.
+
+== Enabling and disabling shims
+
+Disable all shim processing with `quarkus.shim.enabled=false` (targets are left untouched).
+
+Each shim has a `name` (defaulting to the shim class's simple name); disable an individual one
+with:
+
+[source,properties]
+----
+quarkus.shim.instances."my-shim-name".enabled=false
+----
+
+== Configuration reference
+
+include::includes/quarkus-shim.adoc[leveloffset=+1, opts=optional]
+
+== Semantics and limits
+
+* Patching happens during Quarkus augmentation; only classes loaded through the Quarkus
+  ClassLoader can be patched (application classes and indexed dependencies — not JDK
+  classes).
+* `@ShimBefore` / `@ShimAfter` hooks are `static void` with no parameters or a single `self`
+  parameter. `@ShimAfter` runs before every _normal_ return; it does not run when the method
+  exits by throwing.
+* `@ShimReplace` discards the original body entirely and delegates to your static hook. It
+  cannot be combined with `@ShimBefore`/`@ShimAfter` on the same target method.
+* Abstract and native methods cannot be shimmed.
+* `ShimFields`/`ShimMethods` find members declared in superclasses of the target, but only
+  the target class itself is registered for native-image reflection.
+* The same-package trick assumes classpath (unnamed module) deployment — standard for
+  Quarkus apps. Sealed or signed JARs can reject same-package classes from other JARs
+  (rare).
+* Invalid shims (non-static hooks, signature mismatches, unknown target methods, `self` on a
+  static target, definalizing a compile-time constant, ...) fail the build with a
+  descriptive error.

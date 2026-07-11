@@ -1,0 +1,11 @@
+name: "Shim"
+description: "Patch any Java class at build time - insert, wrap, or replace behavior in code you don't own"
+metadata:
+  keywords:
+    - "bytecode"
+    - "patching"
+    - "instrumentation"
+    - "shim"
+  categories:
+    - "miscellaneous"
+  status: "experimental"
