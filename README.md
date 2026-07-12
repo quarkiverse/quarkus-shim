@@ -1,7 +1,6 @@
 # Quarkus Shim
-<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-1-orange.svg?style=flat-square)](#contributors-)
-<!-- ALL-CONTRIBUTORS-BADGE:END -->
+    
+[![Version](https://img.shields.io/maven-central/v/io.quarkiverse.shim/quarkus-shim?logo=apache-maven&style=flat-square)](https://central.sonatype.com/artifact/io.quarkiverse.shim/quarkus-shim-parent) <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->[![All Contributors](https://img.shields.io/badge/all_contributors-1-orange.svg?style=flat-square)](#contributors-)<!-- ALL-CONTRIBUTORS-BADGE:END -->
 
 Patch any Java class at **build time** — insert, wrap, or replace behavior in code you don't own.
 
