@@ -13,6 +13,34 @@ agent, no runtime instrumentation.
 > Note: "shim" here means *modifying existing behavior* in classes you can't edit — not a
 > JS-style compatibility polyfill.
 
+## Installation
+
+Add the extension to your Quarkus application. With Maven, add the following dependency to
+your `pom.xml`:
+
+```xml
+<dependency>
+    <groupId>io.quarkiverse.shim</groupId>
+    <artifactId>quarkus-shim</artifactId>
+    <version>${quarkus-shim.version}</version>
+</dependency>
+```
+
+With Gradle, add to your `build.gradle`:
+
+```groovy
+implementation("io.quarkiverse.shim:quarkus-shim:${quarkusShimVersion}")
+```
+
+or `build.gradle.kts`:
+
+```kotlin
+implementation("io.quarkiverse.shim:quarkus-shim:$quarkusShimVersion")
+```
+
+Replace the version placeholder with the latest release from
+[Maven Central](https://central.sonatype.com/artifact/io.quarkiverse.shim/quarkus-shim).
+
 ## Usage
 
 Declare a shim class annotated with `@Shim`, pointing at the class to patch. Static hook
