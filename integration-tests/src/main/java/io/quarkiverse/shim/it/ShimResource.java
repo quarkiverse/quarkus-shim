@@ -19,14 +19,52 @@ package io.quarkiverse.shim.it;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
 
 @Path("/shim")
 @ApplicationScoped
 public class ShimResource {
-    // add some rest methods here
 
     @GET
     public String hello() {
         return "Hello shim";
+    }
+
+    @GET
+    @Path("/greet/{name}")
+    public String greet(@PathParam("name") String name) {
+        return new Greeter().greet(name);
+    }
+
+    @GET
+    @Path("/answer")
+    public int answer() {
+        return Greeter.answer();
+    }
+
+    @GET
+    @Path("/shout/{name}")
+    public String shout(@PathParam("name") String name) {
+        return new Greeter().shout(name);
+    }
+
+    @GET
+    @Path("/task/{input}")
+    public String task(@PathParam("input") String input) {
+        Task task = new Task();
+        task.run(input);
+        return String.join(",", task.log());
+    }
+
+    @GET
+    @Path("/widget/{name}")
+    public String widget(@PathParam("name") String name) {
+        return new Widget(name).name();
+    }
+
+    @GET
+    @Path("/format")
+    public String format() {
+        return Formatter.format(7) + "|" + Formatter.format("x");
     }
 }
