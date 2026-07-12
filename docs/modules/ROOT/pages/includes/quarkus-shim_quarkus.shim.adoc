@@ -1,0 +1,76 @@
+[.configuration-legend]
+icon:lock[title=Fixed at build time] Configuration property fixed at build time - All other configuration properties are overridable at runtime
+[.configuration-reference.searchable, cols="80,.^10,.^10"]
+|===
+
+h|[.header-title]##Configuration property##
+h|Type
+h|Default
+
+a|icon:lock[title=Fixed at build time] [[quarkus-shim_quarkus-shim-enabled]] [.property-path]##link:#quarkus-shim_quarkus-shim-enabled[`+++quarkus.shim.enabled+++`]##
+ifdef::add-copy-button-to-config-props[]
+config_property_copy_button:+++quarkus.shim.enabled+++[]
+endif::add-copy-button-to-config-props[]
+
+
+[.description]
+--
+Whether shim processing is enabled.
+
+When set to `false`, no target classes are transformed and all `@Shim` declarations in the application are ignored — useful for quickly checking behavior against the unpatched classes.
+
+
+ifdef::add-copy-button-to-env-var[]
+Environment variable: env_var_with_copy_button:+++QUARKUS_SHIM_ENABLED+++[]
+endif::add-copy-button-to-env-var[]
+ifndef::add-copy-button-to-env-var[]
+Environment variable: `+++QUARKUS_SHIM_ENABLED+++`
+endif::add-copy-button-to-env-var[]
+--
+|boolean
+|`+++true+++`
+
+a|icon:lock[title=Fixed at build time] [[quarkus-shim_quarkus-shim-dump-transformed-classes]] [.property-path]##link:#quarkus-shim_quarkus-shim-dump-transformed-classes[`+++quarkus.shim.dump-transformed-classes+++`]##
+ifdef::add-copy-button-to-config-props[]
+config_property_copy_button:+++quarkus.shim.dump-transformed-classes+++[]
+endif::add-copy-button-to-config-props[]
+
+
+[.description]
+--
+Whether a human-readable dump of every transformed target class is written to `target/shim/` during the build. Useful for inspecting exactly what the extension wove into a class.
+
+
+ifdef::add-copy-button-to-env-var[]
+Environment variable: env_var_with_copy_button:+++QUARKUS_SHIM_DUMP_TRANSFORMED_CLASSES+++[]
+endif::add-copy-button-to-env-var[]
+ifndef::add-copy-button-to-env-var[]
+Environment variable: `+++QUARKUS_SHIM_DUMP_TRANSFORMED_CLASSES+++`
+endif::add-copy-button-to-env-var[]
+--
+|boolean
+|`+++false+++`
+
+a|icon:lock[title=Fixed at build time] [[quarkus-shim_quarkus-shim-instances-instances-enabled]] [.property-path]##link:#quarkus-shim_quarkus-shim-instances-instances-enabled[`+++quarkus.shim.instances."instances".enabled+++`]##
+ifdef::add-copy-button-to-config-props[]
+config_property_copy_button:+++quarkus.shim.instances."instances".enabled+++[]
+endif::add-copy-button-to-config-props[]
+
+
+[.description]
+--
+Whether this individual shim is enabled.
+
+
+ifdef::add-copy-button-to-env-var[]
+Environment variable: env_var_with_copy_button:+++QUARKUS_SHIM_INSTANCES__INSTANCES__ENABLED+++[]
+endif::add-copy-button-to-env-var[]
+ifndef::add-copy-button-to-env-var[]
+Environment variable: `+++QUARKUS_SHIM_INSTANCES__INSTANCES__ENABLED+++`
+endif::add-copy-button-to-env-var[]
+--
+|boolean
+|`+++true+++`
+
+|===
+

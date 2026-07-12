@@ -1,8 +1,0 @@
-name: quarkus-shim
-title: Shim
-version: dev
-asciidoc:
-  attributes:
-    project-version: ${project.version}
-nav:
-  - modules/ROOT/nav.adoc

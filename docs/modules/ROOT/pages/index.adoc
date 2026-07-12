@@ -1,5 +1,7 @@
 = Quarkus Shim
 
+include::./includes/attributes.adoc[]
+
 Patch any Java class at *build time* — insert, wrap, or replace behavior in code you don't own.
 
 Shim is a Quarkus extension that weaves your patches into target classes during augmentation

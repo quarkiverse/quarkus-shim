@@ -40,21 +40,38 @@
         </executions>
       </plugin>
       <plugin>
+        <groupId>it.ozimov</groupId>
+        <artifactId>yaml-properties-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <phase>initialize</phase>
+            <goals>
+              <goal>read-project-properties</goal>
+            </goals>
+            <configuration>
+              <files>
+                <file>${project.basedir}/../.github/project.yml</file>
+              </files>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-resources-plugin</artifactId>
         <executions>
           <execution>
-            <id>generate-antora-yml</id>
+            <id>generate-attributes-adoc</id>
             <phase>generate-resources</phase>
             <goals>
               <goal>copy-resources</goal>
             </goals>
             <configuration>
-              <outputDirectory>${project.basedir}</outputDirectory>
+              <outputDirectory>${project.basedir}/modules/ROOT/pages/includes/</outputDirectory>
               <resources>
                 <resource>
-                  <directory>${project.basedir}/templates</directory>
-                  <include>antora.yml</include>
+                  <directory>${project.basedir}/templates/includes</directory>
+                  <include>attributes.adoc</include>
                   <filtering>true</filtering>
                 </resource>
               </resources>
