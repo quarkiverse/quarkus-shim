@@ -7,7 +7,7 @@
   <parent>
     <groupId>io.quarkiverse</groupId>
     <artifactId>quarkiverse-parent</artifactId>
-    <version>19</version>
+    <version>22</version>
   </parent>
 
   <groupId>io.quarkiverse.shim</groupId>
@@ -20,7 +20,6 @@
   <modules>
     <module>runtime</module>
     <module>deployment</module>
-    <module>docs</module>
   </modules>
 
   <properties>
@@ -44,10 +43,42 @@
       <plugins>
         <plugin>
           <groupId>io.quarkus</groupId>
-          <artifactId>quarkus-extension-maven-plugin</artifactId>
+          <artifactId>quarkus-maven-plugin</artifactId>
+          <version>${quarkus.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>io.quarkus</groupId>
+          <artifactId>quarkus-config-doc-maven-plugin</artifactId>
           <version>${quarkus.version}</version>
         </plugin>
       </plugins>
     </pluginManagement>
   </build>
+
+  <profiles>
+    <profile>
+      <id>docs</id>
+      <activation>
+        <property>
+          <name>performRelease</name>
+          <value>!true</value>
+        </property>
+      </activation>
+      <modules>
+        <module>docs</module>
+      </modules>
+    </profile>
+    <profile>
+      <id>it</id>
+      <activation>
+        <property>
+          <name>performRelease</name>
+          <value>!true</value>
+        </property>
+      </activation>
+      <modules>
+        <module>integration-tests</module>
+      </modules>
+    </profile>
+  </profiles>
 </project>
