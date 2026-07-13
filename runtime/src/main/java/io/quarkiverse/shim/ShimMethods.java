@@ -13,12 +13,17 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>
  * Lookups are cached. Every {@code @Shim} target class is automatically
  * registered for reflection, so this also works in a GraalVM native image.
- * Methods declared in superclasses of the target are found, but only the
- * target class itself is registered for native reflection.
+ * Methods declared in indexed superclasses of the target are found and those
+ * superclasses are registered for native reflection as well.
  */
 public final class ShimMethods {
 
-    private static final Map<String, Method> CACHE = new ConcurrentHashMap<>();
+    private static final ClassValue<Map<MethodKey, Method>> CACHE = new ClassValue<>() {
+        @Override
+        protected Map<MethodKey, Method> computeValue(Class<?> type) {
+            return new ConcurrentHashMap<>();
+        }
+    };
 
     private static final Map<Class<?>, Class<?>> WRAPPERS = Map.of(
             boolean.class, Boolean.class,
@@ -46,9 +51,38 @@ public final class ShimMethods {
         return doInvoke(owner, null, methodName, args);
     }
 
+    /**
+     * Invokes an instance method using an exact parameter signature. Use this
+     * when overload resolution from runtime argument values would be ambiguous,
+     * particularly when one or more arguments are {@code null}.
+     */
+    public static <T> T invokeExact(Object instance, String methodName, Class<?>[] parameterTypes, Object... args) {
+        return doInvokeExact(instance.getClass(), instance, methodName, parameterTypes, args);
+    }
+
+    /** Invokes a static method using an exact parameter signature. */
+    public static <T> T invokeStaticExact(Class<?> owner, String methodName, Class<?>[] parameterTypes, Object... args) {
+        return doInvokeExact(owner, null, methodName, parameterTypes, args);
+    }
+
     @SuppressWarnings("unchecked")
     private static <T> T doInvoke(Class<?> owner, Object instance, String methodName, Object... args) {
         Method method = resolve(owner, methodName, args);
+        return invokeResolved(owner, instance, methodName, method, args);
+    }
+
+    private static <T> T doInvokeExact(Class<?> owner, Object instance, String methodName, Class<?>[] parameterTypes,
+            Object[] args) {
+        if (parameterTypes.length != args.length) {
+            throw new IllegalArgumentException("Parameter type count does not match argument count for '"
+                    + methodName + "'");
+        }
+        Method method = resolveExact(owner, methodName, parameterTypes);
+        return invokeResolved(owner, instance, methodName, method, args);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T invokeResolved(Class<?> owner, Object instance, String methodName, Method method, Object[] args) {
         try {
             return (T) method.invoke(instance, args);
         } catch (IllegalAccessException e) {
@@ -66,11 +100,12 @@ public final class ShimMethods {
     }
 
     private static Method resolve(Class<?> owner, String methodName, Object[] args) {
-        StringBuilder key = new StringBuilder(owner.getName()).append('#').append(methodName);
+        List<Class<?>> argumentTypes = new ArrayList<>(args.length);
         for (Object arg : args) {
-            key.append('|').append(arg == null ? "null" : arg.getClass().getName());
+            argumentTypes.add(arg == null ? NullArgument.class : arg.getClass());
         }
-        return CACHE.computeIfAbsent(key.toString(), k -> {
+        MethodKey key = new MethodKey(methodName, List.copyOf(argumentTypes), false);
+        return CACHE.get(owner).computeIfAbsent(key, k -> {
             List<Method> matches = new ArrayList<>();
             for (Class<?> c = owner; c != null; c = c.getSuperclass()) {
                 for (Method method : c.getDeclaredMethods()) {
@@ -88,11 +123,28 @@ public final class ShimMethods {
             }
             if (matches.size() > 1) {
                 throw new IllegalArgumentException("Ambiguous method '" + methodName + "' on " + owner
-                        + ": " + matches + ". Disambiguate by casting arguments to the exact parameter types.");
+                        + ": " + matches + ". Use invokeExact/invokeStaticExact with explicit parameter types.");
             }
             Method method = matches.get(0);
             method.setAccessible(true);
             return method;
+        });
+    }
+
+    private static Method resolveExact(Class<?> owner, String methodName, Class<?>[] parameterTypes) {
+        MethodKey key = new MethodKey(methodName, List.of(parameterTypes.clone()), true);
+        return CACHE.get(owner).computeIfAbsent(key, ignored -> {
+            for (Class<?> c = owner; c != null; c = c.getSuperclass()) {
+                try {
+                    Method method = c.getDeclaredMethod(methodName, parameterTypes);
+                    method.setAccessible(true);
+                    return method;
+                } catch (NoSuchMethodException notOnThisClass) {
+                    // keep walking up the hierarchy
+                }
+            }
+            throw new IllegalArgumentException("No method '" + methodName + "' on " + owner
+                    + " with parameter types " + List.of(parameterTypes));
         });
     }
 
@@ -114,5 +166,13 @@ public final class ShimMethods {
             }
         }
         return true;
+    }
+
+    private record MethodKey(String name, List<Class<?>> parameterTypes, boolean exact) {
+    }
+
+    private static final class NullArgument {
+        private NullArgument() {
+        }
     }
 }

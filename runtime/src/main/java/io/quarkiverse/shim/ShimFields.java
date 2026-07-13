@@ -10,12 +10,17 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>
  * Lookups are cached. Every {@code @Shim} target class is automatically
  * registered for reflection, so this also works in a GraalVM native image.
- * Fields declared in superclasses of the target are found, but only the target
- * class itself is registered for native reflection.
+ * Fields declared in indexed superclasses of the target are found and those
+ * superclasses are registered for native reflection as well.
  */
 public final class ShimFields {
 
-    private static final Map<String, Field> CACHE = new ConcurrentHashMap<>();
+    private static final ClassValue<Map<String, Field>> CACHE = new ClassValue<>() {
+        @Override
+        protected Map<String, Field> computeValue(Class<?> type) {
+            return new ConcurrentHashMap<>();
+        }
+    };
 
     private ShimFields() {
     }
@@ -59,7 +64,7 @@ public final class ShimFields {
     }
 
     private static Field field(Class<?> owner, String fieldName) {
-        return CACHE.computeIfAbsent(owner.getName() + '#' + fieldName, key -> {
+        return CACHE.get(owner).computeIfAbsent(fieldName, key -> {
             for (Class<?> c = owner; c != null; c = c.getSuperclass()) {
                 try {
                     Field field = c.getDeclaredField(fieldName);

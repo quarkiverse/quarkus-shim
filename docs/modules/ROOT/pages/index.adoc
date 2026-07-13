@@ -144,6 +144,8 @@ public static String greet(Greeter self, String name) {
 ----
 
 Static members use `ShimFields.getStatic` / `setStatic` and `ShimMethods.invokeStatic`.
+When overloads cannot be inferred from runtime values (especially `null`), use
+`ShimMethods.invokeExact` / `invokeStaticExact` with an explicit `Class<?>[]` signature.
 
 === Package-private classes and members: the same-package trick
 
