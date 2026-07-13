@@ -111,6 +111,8 @@ public static String greet(Greeter self, String name) {
 ```
 
 Static members use `ShimFields.getStatic` / `setStatic` and `ShimMethods.invokeStatic`.
+When overloads cannot be inferred from runtime values (especially `null`), use
+`ShimMethods.invokeExact` / `invokeStaticExact` with an explicit `Class<?>[]` signature.
 
 **Final fields** — reading is unrestricted, but writing a `final` field via reflection is
 fragile (forbidden for `static final` and records, and the JDK is progressively restricting

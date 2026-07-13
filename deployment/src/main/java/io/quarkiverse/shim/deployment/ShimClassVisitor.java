@@ -1,6 +1,7 @@
 package io.quarkiverse.shim.deployment;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -10,6 +11,7 @@ import org.objectweb.asm.Handle;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import org.objectweb.asm.tree.MethodNode;
 
 /**
  * Applies the collected {@link ShimOp}s to one target class.
@@ -30,7 +32,11 @@ final class ShimClassVisitor extends ClassVisitor {
     private final boolean widenAccess;
     private final Runnable onEnd;
     private final List<AroundPlan> aroundPlans = new ArrayList<>();
+    private final List<ReplacementPlan> replacementPlans = new ArrayList<>();
+    private final Set<ShimOp> matchedOps = new LinkedHashSet<>();
+    private final Set<String> matchedDefinalizeFields = new LinkedHashSet<>();
     private String internalName;
+    private boolean isInterface;
 
     ShimClassVisitor(ClassVisitor delegate, List<ShimOp> ops, Set<String> definalize, boolean widenAccess,
             Runnable onEnd) {
@@ -45,11 +51,15 @@ final class ShimClassVisitor extends ClassVisitor {
     public void visit(int version, int access, String name, String signature, String superName,
             String[] interfaces) {
         internalName = name;
+        isInterface = (access & Opcodes.ACC_INTERFACE) != 0;
         super.visit(version, access, name, signature, superName, interfaces);
     }
 
     @Override
     public FieldVisitor visitField(int access, String name, String descriptor, String signature, Object value) {
+        if (definalize.contains(name)) {
+            matchedDefinalizeFields.add(name);
+        }
         boolean stripFinal = definalize.contains(name) || widenAccess;
         if (stripFinal && (access & Opcodes.ACC_FINAL) != 0) {
             if ((access & Opcodes.ACC_STATIC) != 0 && value != null) {
@@ -76,6 +86,7 @@ final class ShimClassVisitor extends ClassVisitor {
         for (ShimOp op : ops) {
             if (op.matches(name, descriptor)) {
                 matching.add(op);
+                matchedOps.add(op);
             }
         }
         if (matching.isEmpty()) {
@@ -93,8 +104,20 @@ final class ShimClassVisitor extends ClassVisitor {
         List<ShimOp> afterOps = new ArrayList<>();
         for (ShimOp op : matching) {
             switch (op.kind) {
-                case REPLACE -> replace = op;
-                case AROUND -> around = op;
+                case REPLACE -> {
+                    if (replace != null) {
+                        throw new IllegalStateException("Method " + internalName.replace('/', '.') + "#" + name
+                                + " has multiple @ShimReplace hooks: " + replace.hookRef() + " and " + op.hookRef());
+                    }
+                    replace = op;
+                }
+                case AROUND -> {
+                    if (around != null) {
+                        throw new IllegalStateException("Method " + internalName.replace('/', '.') + "#" + name
+                                + " has multiple @ShimAround hooks: " + around.hookRef() + " and " + op.hookRef());
+                    }
+                    around = op;
+                }
                 case BEFORE -> beforeOps.add(op);
                 case AFTER -> afterOps.add(op);
             }
@@ -110,7 +133,7 @@ final class ShimClassVisitor extends ClassVisitor {
                         + internalName.replace('/', '.'));
             }
             boolean hookSelf = validateAround(around, isStatic, descriptor);
-            return renameForAround(access, name, descriptor, signature, exceptions, isStatic, around, hookSelf);
+            return captureAround(access, name, descriptor, signature, exceptions, isStatic, around, hookSelf);
         }
 
         if (replace != null) {
@@ -122,9 +145,9 @@ final class ShimClassVisitor extends ClassVisitor {
                 throw new IllegalStateException("Cannot replace constructor of " + internalName.replace('/', '.')
                         + ": constructors must call super()/this() and cannot be delegated");
             }
-            MethodVisitor mv = super.visitMethod(emittedAccess(access, name), name, descriptor, signature, exceptions);
-            emitDelegation(mv, isStatic, name, descriptor, replace);
-            return null; // discard the original body entirely
+            MethodNode original = new MethodNode(Opcodes.ASM9, access, name, descriptor, signature, exceptions);
+            replacementPlans.add(new ReplacementPlan(original, isStatic, replace));
+            return original;
         }
 
         List<AdviceBinding> before = new ArrayList<>();
@@ -152,9 +175,28 @@ final class ShimClassVisitor extends ClassVisitor {
 
     @Override
     public void visitEnd() {
+        Set<ShimOp> missingOps = new LinkedHashSet<>(ops);
+        missingOps.removeAll(matchedOps);
+        if (!missingOps.isEmpty()) {
+            ShimOp missing = missingOps.iterator().next();
+            throw new IllegalStateException("Shim hook " + missing.hookRef() + " targets method '"
+                    + missing.targetMethodName + "' which does not exist on " + internalName.replace('/', '.')
+                    + " (with the requested overload, if any)");
+        }
+        Set<String> missingFields = new LinkedHashSet<>(definalize);
+        missingFields.removeAll(matchedDefinalizeFields);
+        if (!missingFields.isEmpty()) {
+            throw new IllegalStateException("@Shim definalize lists field '" + missingFields.iterator().next()
+                    + "' which does not exist on " + internalName.replace('/', '.'));
+        }
+        for (ReplacementPlan plan : replacementPlans) {
+            emitReplacement(plan);
+        }
         for (AroundPlan plan : aroundPlans) {
+            MethodNode wrapper = createAroundWrapper(plan);
+            emitRenamedOriginal(plan);
             emitBoxBridge(plan);
-            emitAroundMethod(plan);
+            accept(wrapper);
         }
         super.visitEnd();
         if (onEnd != null) {
@@ -171,7 +213,7 @@ final class ShimClassVisitor extends ClassVisitor {
         Type targetReturn = Type.getReturnType(targetDescriptor);
         String selfDesc = "L" + internalName + ";";
 
-        if (isStatic && hookParams.length > 0 && isSelfType(hookParams[0], selfDesc)
+        if (isStatic && hookParams.length > 0 && hookParams[0].getDescriptor().equals(selfDesc)
                 && !"<clinit>".equals(methodName)) {
             // only flag when it cannot instead be interpreted as a matching first argument
             if (targetParams.length == 0 || !targetParams[0].getDescriptor().equals(hookParams[0].getDescriptor())) {
@@ -275,16 +317,23 @@ final class ShimClassVisitor extends ClassVisitor {
 
     // --- @ShimAround ---------------------------------------------------------
 
-    private MethodVisitor renameForAround(int access, String name, String descriptor, String signature,
+    private MethodVisitor captureAround(int access, String name, String descriptor, String signature,
             String[] exceptions, boolean isStatic, ShimOp op, boolean hookSelf) {
         String suffix = Integer.toHexString(descriptor.hashCode());
         String renamed = name + "$shim$orig$" + suffix;
         String box = name + "$shim$box$" + suffix;
-        aroundPlans.add(new AroundPlan(name, descriptor, signature, exceptions, access, isStatic, op, renamed, box,
-                hookSelf));
-        int renamedAccess = (access & ~(Opcodes.ACC_PUBLIC | Opcodes.ACC_PROTECTED | Opcodes.ACC_FINAL))
+        MethodNode original = new MethodNode(Opcodes.ASM9, access, name, descriptor, signature, exceptions);
+        aroundPlans.add(new AroundPlan(name, descriptor, signature, exceptions, emittedAccess(access, name), isStatic,
+                op, renamed, box, hookSelf, original));
+        return original;
+    }
+
+    private void emitRenamedOriginal(AroundPlan plan) {
+        MethodNode original = plan.original;
+        original.name = plan.renamed;
+        original.access = (original.access & ~(Opcodes.ACC_PUBLIC | Opcodes.ACC_PROTECTED | Opcodes.ACC_FINAL))
                 | Opcodes.ACC_PRIVATE | Opcodes.ACC_SYNTHETIC;
-        return super.visitMethod(renamedAccess, renamed, descriptor, signature, exceptions);
+        accept(original);
     }
 
     private void emitBoxBridge(AroundPlan plan) {
@@ -305,19 +354,21 @@ final class ShimClassVisitor extends ClassVisitor {
             slot += arg.getSize();
         }
         mv.visitMethodInsn(plan.isStatic ? Opcodes.INVOKESTATIC : Opcodes.INVOKESPECIAL,
-                internalName, plan.renamed, plan.descriptor, false);
+                internalName, plan.renamed, plan.descriptor, isInterface);
         boxReturn(mv, ret);
         mv.visitInsn(Opcodes.ARETURN);
         mv.visitMaxs(0, 0);
         mv.visitEnd();
     }
 
-    private void emitAroundMethod(AroundPlan plan) {
+    private MethodNode createAroundWrapper(AroundPlan plan) {
         Type[] args = Type.getArgumentTypes(plan.descriptor);
         Type ret = Type.getReturnType(plan.descriptor);
         String captured = (plan.isStatic ? "" : selfDesc()) + argsDescriptor(args);
         String boxDescriptor = "(" + captured + ")" + OBJECT_DESC;
-        MethodVisitor mv = super.visitMethod(plan.access, plan.name, plan.descriptor, plan.signature, plan.exceptions);
+        MethodNode mv = new MethodNode(Opcodes.ASM9, plan.access, plan.name, plan.descriptor, plan.signature,
+                plan.exceptions);
+        moveDeclarationMetadata(plan.original, mv);
         mv.visitCode();
         int slot = 0;
         if (!plan.isStatic) {
@@ -328,7 +379,7 @@ final class ShimClassVisitor extends ClassVisitor {
             mv.visitVarInsn(arg.getOpcode(Opcodes.ILOAD), slot);
             slot += arg.getSize();
         }
-        Handle impl = new Handle(Opcodes.H_INVOKESTATIC, internalName, plan.box, boxDescriptor, false);
+        Handle impl = new Handle(Opcodes.H_INVOKESTATIC, internalName, plan.box, boxDescriptor, isInterface);
         mv.visitInvokeDynamicInsn("proceed", "(" + captured + ")" + SHIM_CALL_DESC, METAFACTORY,
                 Type.getMethodType("()" + OBJECT_DESC), impl, Type.getMethodType("()" + OBJECT_DESC));
         if (plan.hookSelf) {
@@ -344,6 +395,58 @@ final class ShimClassVisitor extends ClassVisitor {
         mv.visitInsn(ret.getOpcode(Opcodes.IRETURN));
         mv.visitMaxs(0, 0);
         mv.visitEnd();
+        return mv;
+    }
+
+    private static void moveDeclarationMetadata(MethodNode source, MethodNode target) {
+        target.parameters = source.parameters;
+        source.parameters = null;
+        target.annotationDefault = source.annotationDefault;
+        source.annotationDefault = null;
+        target.visibleAnnotations = source.visibleAnnotations;
+        source.visibleAnnotations = null;
+        target.invisibleAnnotations = source.invisibleAnnotations;
+        source.invisibleAnnotations = null;
+        target.visibleTypeAnnotations = source.visibleTypeAnnotations;
+        source.visibleTypeAnnotations = null;
+        target.invisibleTypeAnnotations = source.invisibleTypeAnnotations;
+        source.invisibleTypeAnnotations = null;
+        target.visibleAnnotableParameterCount = source.visibleAnnotableParameterCount;
+        source.visibleAnnotableParameterCount = 0;
+        target.visibleParameterAnnotations = source.visibleParameterAnnotations;
+        source.visibleParameterAnnotations = null;
+        target.invisibleAnnotableParameterCount = source.invisibleAnnotableParameterCount;
+        source.invisibleAnnotableParameterCount = 0;
+        target.invisibleParameterAnnotations = source.invisibleParameterAnnotations;
+        source.invisibleParameterAnnotations = null;
+        target.attrs = source.attrs;
+        source.attrs = null;
+    }
+
+    private void emitReplacement(ReplacementPlan plan) {
+        MethodNode method = plan.original;
+        method.access = emittedAccess(method.access, method.name);
+        method.instructions.clear();
+        method.tryCatchBlocks.clear();
+        if (method.localVariables != null) {
+            method.localVariables.clear();
+        }
+        if (method.visibleLocalVariableAnnotations != null) {
+            method.visibleLocalVariableAnnotations.clear();
+        }
+        if (method.invisibleLocalVariableAnnotations != null) {
+            method.invisibleLocalVariableAnnotations.clear();
+        }
+        method.maxStack = 0;
+        method.maxLocals = 0;
+        emitDelegation(method, plan.isStatic, method.name, method.desc, plan.op);
+        accept(method);
+    }
+
+    private void accept(MethodNode method) {
+        MethodVisitor output = super.visitMethod(method.access, method.name, method.desc, method.signature,
+                method.exceptions == null ? null : method.exceptions.toArray(String[]::new));
+        method.accept(output);
     }
 
     private static void boxReturn(MethodVisitor mv, Type ret) {
@@ -436,9 +539,10 @@ final class ShimClassVisitor extends ClassVisitor {
         final String renamed;
         final String box;
         final boolean hookSelf;
+        final MethodNode original;
 
         AroundPlan(String name, String descriptor, String signature, String[] exceptions, int access,
-                boolean isStatic, ShimOp op, String renamed, String box, boolean hookSelf) {
+                boolean isStatic, ShimOp op, String renamed, String box, boolean hookSelf, MethodNode original) {
             this.name = name;
             this.descriptor = descriptor;
             this.signature = signature;
@@ -449,6 +553,19 @@ final class ShimClassVisitor extends ClassVisitor {
             this.renamed = renamed;
             this.box = box;
             this.hookSelf = hookSelf;
+            this.original = original;
+        }
+    }
+
+    private static final class ReplacementPlan {
+        final MethodNode original;
+        final boolean isStatic;
+        final ShimOp op;
+
+        ReplacementPlan(MethodNode original, boolean isStatic, ShimOp op) {
+            this.original = original;
+            this.isStatic = isStatic;
+            this.op = op;
         }
     }
 }

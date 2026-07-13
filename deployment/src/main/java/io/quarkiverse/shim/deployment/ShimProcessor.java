@@ -123,8 +123,11 @@ public class ShimProcessor {
                         return new ShimClassVisitor(outputVisitor, ops, definalize, widen, null);
                     })
                     .build());
-            // make ShimFields/ShimMethods reflection work in native image
-            reflectiveClasses.produce(ReflectiveClassBuildItem.builder(targetClass).fields().methods().build());
+            // make ShimFields/ShimMethods reflection work in native image, including
+            // members that the helpers discover while walking indexed superclasses
+            for (String reflectionClass : reflectionHierarchy(index, targetClass)) {
+                reflectiveClasses.produce(ReflectiveClassBuildItem.builder(reflectionClass).fields().methods().build());
+            }
 
             for (ShimOp op : ops) {
                 rows.add(row(targetClass, op));
@@ -320,7 +323,7 @@ public class ShimProcessor {
                 }
             case ARRAY:
                 ArrayType arrayType = type.asArrayType();
-                return "[".repeat(arrayType.dimensions()) + typeDescriptor(arrayType.component());
+                return "[".repeat(arrayType.dimensions()) + typeDescriptor(arrayType.constituent());
             case CLASS:
             case PARAMETERIZED_TYPE:
                 return "L" + type.name().toString().replace('.', '/') + ";";
@@ -328,6 +331,21 @@ public class ShimProcessor {
                 throw new IllegalStateException(
                         "Unsupported type in shim hook signature (no generics/type variables): " + type);
         }
+    }
+
+    static List<String> reflectionHierarchy(IndexView index, String targetClass) {
+        List<String> hierarchy = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        String currentName = targetClass;
+        while (currentName != null && !"java.lang.Object".equals(currentName) && seen.add(currentName)) {
+            hierarchy.add(currentName);
+            ClassInfo current = index.getClassByName(DotName.createSimple(currentName));
+            if (current == null || current.superName() == null) {
+                break;
+            }
+            currentName = current.superName().toString();
+        }
+        return List.copyOf(hierarchy);
     }
 
     /** Accumulates all ops, definalize fields and widen flag for one target class. */

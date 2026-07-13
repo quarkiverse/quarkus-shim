@@ -80,6 +80,7 @@ final class ShimAdviceMethodVisitor extends LocalVariablesSorter {
                 }
                 if (b.returned) {
                     super.visitVarInsn(returnType.getOpcode(Opcodes.ILOAD), retLocal);
+                    boxReturnedValueIfNeeded(b);
                 }
                 invokeHook(b);
             }
@@ -97,5 +98,30 @@ final class ShimAdviceMethodVisitor extends LocalVariablesSorter {
     private void invokeHook(AdviceBinding b) {
         super.visitMethodInsn(Opcodes.INVOKESTATIC, b.op.shimOwnerInternalName, b.op.shimMethodName,
                 b.op.shimMethodDescriptor, false);
+    }
+
+    private void boxReturnedValueIfNeeded(AdviceBinding binding) {
+        Type[] hookParameters = Type.getArgumentTypes(binding.op.shimMethodDescriptor);
+        Type hookReturnParameter = hookParameters[hookParameters.length - 1];
+        if (hookReturnParameter.getSort() != Type.OBJECT || !"java/lang/Object".equals(hookReturnParameter.getInternalName())) {
+            return;
+        }
+        switch (returnType.getSort()) {
+            case Type.BOOLEAN -> box("java/lang/Boolean", "(Z)Ljava/lang/Boolean;");
+            case Type.BYTE -> box("java/lang/Byte", "(B)Ljava/lang/Byte;");
+            case Type.CHAR -> box("java/lang/Character", "(C)Ljava/lang/Character;");
+            case Type.SHORT -> box("java/lang/Short", "(S)Ljava/lang/Short;");
+            case Type.INT -> box("java/lang/Integer", "(I)Ljava/lang/Integer;");
+            case Type.LONG -> box("java/lang/Long", "(J)Ljava/lang/Long;");
+            case Type.FLOAT -> box("java/lang/Float", "(F)Ljava/lang/Float;");
+            case Type.DOUBLE -> box("java/lang/Double", "(D)Ljava/lang/Double;");
+            default -> {
+                // references are already Object-compatible
+            }
+        }
+    }
+
+    private void box(String owner, String descriptor) {
+        super.visitMethodInsn(Opcodes.INVOKESTATIC, owner, "valueOf", descriptor, false);
     }
 }
