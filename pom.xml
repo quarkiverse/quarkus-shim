@@ -10,7 +10,7 @@
 
   <groupId>io.quarkiverse.shim</groupId>
   <artifactId>quarkus-shim-parent</artifactId>
-  <version>0.1.1</version>
+  <version>999-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>Quarkus Shim - Parent</name>
   <description>Patch any Java class at build time - insert, wrap, or replace behavior in code you don't own</description>
@@ -84,8 +84,4 @@
       </modules>
     </profile>
   </profiles>
-
-  <scm>
-    <tag>0.1.1</tag>
-  </scm>
 </project>
