@@ -15,6 +15,7 @@ import org.jboss.jandex.AnnotationValue;
 import org.jboss.jandex.ArrayType;
 import org.jboss.jandex.ClassInfo;
 import org.jboss.jandex.DotName;
+import org.jboss.jandex.FieldInfo;
 import org.jboss.jandex.IndexView;
 import org.jboss.jandex.MethodInfo;
 import org.jboss.jandex.Type;
@@ -22,6 +23,7 @@ import org.jboss.logging.Logger;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.util.TraceClassVisitor;
 
+import io.quarkiverse.shim.AnnotationConflict;
 import io.quarkiverse.shim.ShimRecorder;
 import io.quarkus.deployment.IsDevelopment;
 import io.quarkus.deployment.annotations.BuildProducer;
@@ -51,6 +53,9 @@ public class ShimProcessor {
     private static final DotName SHIM_REPLACE = DotName.createSimple("io.quarkiverse.shim.ShimReplace");
     private static final DotName SHIM_AROUND = DotName.createSimple("io.quarkiverse.shim.ShimAround");
     private static final DotName SHIM_PRIORITY = DotName.createSimple("io.quarkiverse.shim.ShimPriority");
+    private static final DotName SHIM_ANNOTATE = DotName.createSimple("io.quarkiverse.shim.ShimAnnotate");
+    private static final Set<DotName> SHIM_CONTROL_ANNOTATIONS = Set.of(
+            SHIM, SHIM_BEFORE, SHIM_AFTER, SHIM_REPLACE, SHIM_AROUND, SHIM_PRIORITY, SHIM_ANNOTATE);
 
     @BuildStep
     FeatureBuildItem feature() {
@@ -89,11 +94,16 @@ public class ShimProcessor {
             if (widenValue != null && widenValue.asBoolean()) {
                 plan.widenAccess = true;
             }
+            collectClassAnnotationPatch(shimClass, shimName, plan.annotationPatches);
             for (MethodInfo hook : shimClass.methods()) {
                 collectOp(hook, targetClass, shimName, SHIM_BEFORE, ShimOp.Kind.BEFORE, plan.ops);
                 collectOp(hook, targetClass, shimName, SHIM_AFTER, ShimOp.Kind.AFTER, plan.ops);
                 collectOp(hook, targetClass, shimName, SHIM_REPLACE, ShimOp.Kind.REPLACE, plan.ops);
                 collectOp(hook, targetClass, shimName, SHIM_AROUND, ShimOp.Kind.AROUND, plan.ops);
+                collectMethodAnnotationPatch(hook, shimName, plan.annotationPatches);
+            }
+            for (FieldInfo field : shimClass.fields()) {
+                collectFieldAnnotationPatch(field, shimName, plan.annotationPatches);
             }
         }
 
@@ -103,8 +113,10 @@ public class ShimProcessor {
             ClassPlan plan = entry.getValue();
             validateExistence(index, targetClass, plan.ops);
             validateDefinalize(index, targetClass, plan.definalize);
+            validateAnnotationTargets(index, targetClass, plan.annotationPatches);
 
             List<ShimOp> ops = List.copyOf(plan.ops);
+            List<ShimAnnotationPatch> annotationPatches = List.copyOf(plan.annotationPatches);
             Set<String> definalize = Set.copyOf(plan.definalize);
             boolean widen = plan.widenAccess;
             boolean dump = config.dumpTransformedClasses();
@@ -117,10 +129,10 @@ public class ShimProcessor {
                         if (dump) {
                             StringWriter sw = new StringWriter();
                             ClassVisitor trace = new TraceClassVisitor(outputVisitor, new PrintWriter(sw));
-                            return new ShimClassVisitor(trace, ops, definalize, widen,
+                            return new ShimClassVisitor(trace, ops, annotationPatches, definalize, widen,
                                     () -> ShimDump.write(className, sw.toString()));
                         }
-                        return new ShimClassVisitor(outputVisitor, ops, definalize, widen, null);
+                        return new ShimClassVisitor(outputVisitor, ops, annotationPatches, definalize, widen, null);
                     })
                     .build());
             // make ShimFields/ShimMethods reflection work in native image, including
@@ -132,6 +144,10 @@ public class ShimProcessor {
             for (ShimOp op : ops) {
                 rows.add(row(targetClass, op));
                 LOG.infof("Shim: %s", op.describe(targetClass));
+            }
+            for (ShimAnnotationPatch patch : annotationPatches) {
+                rows.add(row(targetClass, patch));
+                LOG.infof("Shim: %s", patch.describe(targetClass));
             }
         }
         applied.produce(new AppliedShimsBuildItem(rows));
@@ -166,6 +182,16 @@ public class ShimProcessor {
         row.put("kind", op.kind.name().toLowerCase());
         row.put("hook", op.hookRef());
         row.put("shim", op.shimName);
+        return row;
+    }
+
+    private static Map<String, String> row(String targetClass, ShimAnnotationPatch patch) {
+        Map<String, String> row = new LinkedHashMap<>();
+        row.put("target", targetClass);
+        row.put("method", patch.kind == ShimAnnotationPatch.Kind.CLASS ? "<class>" : patch.targetName);
+        row.put("kind", "annotate-" + patch.kind.name().toLowerCase());
+        row.put("hook", patch.sourceRef);
+        row.put("shim", patch.shimName);
         return row;
     }
 
@@ -246,6 +272,112 @@ public class ShimProcessor {
                 hook.name(), methodDescriptor(hook), shimName));
     }
 
+    private void collectClassAnnotationPatch(ClassInfo shimClass, String shimName,
+            List<ShimAnnotationPatch> patches) {
+        AnnotationInstance marker = shimClass.declaredAnnotation(SHIM_ANNOTATE);
+        if (marker == null) {
+            return;
+        }
+        rejectMemberSelector(marker, shimClass.name().toString());
+        patches.add(new ShimAnnotationPatch(ShimAnnotationPatch.Kind.CLASS, "", "", false,
+                copyableAnnotations(shimClass.declaredAnnotations(), shimClass.name().toString()),
+                conflictPolicy(marker),
+                shimClass.name().toString(), shimName));
+    }
+
+    private void collectMethodAnnotationPatch(MethodInfo source, String shimName,
+            List<ShimAnnotationPatch> patches) {
+        AnnotationInstance marker = source.declaredAnnotation(SHIM_ANNOTATE);
+        if (marker == null) {
+            return;
+        }
+        String sourceRef = source.declaringClass().name() + "#" + source.name();
+        String targetName = stringValue(marker, "target");
+        if (targetName.isBlank()) {
+            targetName = source.name();
+        }
+        MethodSelector selector = methodSelector(marker, sourceRef);
+        patches.add(new ShimAnnotationPatch(ShimAnnotationPatch.Kind.METHOD, targetName,
+                selector.descriptor, selector.paramsOnly,
+                copyableAnnotations(source.declaredAnnotations(), sourceRef), conflictPolicy(marker), sourceRef, shimName));
+    }
+
+    private void collectFieldAnnotationPatch(FieldInfo source, String shimName,
+            List<ShimAnnotationPatch> patches) {
+        AnnotationInstance marker = source.declaredAnnotation(SHIM_ANNOTATE);
+        if (marker == null) {
+            return;
+        }
+        String sourceRef = source.declaringClass().name() + "#" + source.name();
+        if (!stringValue(marker, "descriptor").isBlank() || hasParamTypes(marker)) {
+            throw new IllegalStateException("@ShimAnnotate on field " + sourceRef
+                    + " cannot set descriptor() or paramTypes(); those selectors apply only to methods");
+        }
+        String targetName = stringValue(marker, "target");
+        if (targetName.isBlank()) {
+            targetName = source.name();
+        }
+        patches.add(new ShimAnnotationPatch(ShimAnnotationPatch.Kind.FIELD, targetName, "", false,
+                copyableAnnotations(source.declaredAnnotations(), sourceRef), conflictPolicy(marker), sourceRef, shimName));
+    }
+
+    private List<ShimAnnotation> copyableAnnotations(List<AnnotationInstance> declared, String sourceRef) {
+        List<ShimAnnotation> annotations = declared.stream()
+                .filter(annotation -> !SHIM_CONTROL_ANNOTATIONS.contains(annotation.name()))
+                .map(ShimAnnotation::from)
+                .toList();
+        if (annotations.isEmpty()) {
+            throw new IllegalStateException("@ShimAnnotate on " + sourceRef
+                    + " has no non-Shim annotations to attach");
+        }
+        return annotations;
+    }
+
+    private MethodSelector methodSelector(AnnotationInstance marker, String sourceRef) {
+        String descriptor = stringValue(marker, "descriptor");
+        AnnotationValue paramTypesValue = marker.value("paramTypes");
+        boolean hasParamTypes = paramTypesValue != null && paramTypesValue.asClassArray().length > 0;
+        if (!descriptor.isBlank() && hasParamTypes) {
+            throw new IllegalStateException("@ShimAnnotate on " + sourceRef
+                    + " sets both descriptor() and paramTypes(); use one or the other");
+        }
+        if (!descriptor.isBlank()) {
+            return new MethodSelector(descriptor, false);
+        }
+        if (hasParamTypes) {
+            StringBuilder filter = new StringBuilder("(");
+            for (Type type : paramTypesValue.asClassArray()) {
+                filter.append(typeDescriptor(type));
+            }
+            return new MethodSelector(filter.append(')').toString(), true);
+        }
+        return new MethodSelector("", false);
+    }
+
+    private void rejectMemberSelector(AnnotationInstance marker, String sourceRef) {
+        if (!stringValue(marker, "target").isBlank()
+                || !stringValue(marker, "descriptor").isBlank()
+                || hasParamTypes(marker)) {
+            throw new IllegalStateException("@ShimAnnotate on class " + sourceRef
+                    + " cannot set target(), descriptor(), or paramTypes()");
+        }
+    }
+
+    private static boolean hasParamTypes(AnnotationInstance marker) {
+        AnnotationValue value = marker.value("paramTypes");
+        return value != null && value.asClassArray().length > 0;
+    }
+
+    private static AnnotationConflict conflictPolicy(AnnotationInstance marker) {
+        AnnotationValue value = marker.value("onConflict");
+        return value == null ? AnnotationConflict.REPLACE : AnnotationConflict.valueOf(value.asEnum());
+    }
+
+    private static String stringValue(AnnotationInstance annotation, String name) {
+        AnnotationValue value = annotation.value(name);
+        return value == null ? "" : value.asString();
+    }
+
     /**
      * When the target class is part of the application index we can fail the
      * build with a precise message instead of erroring later. Targets outside
@@ -288,6 +420,29 @@ public class ShimProcessor {
         }
     }
 
+    private void validateAnnotationTargets(IndexView index, String targetClass,
+            List<ShimAnnotationPatch> patches) {
+        ClassInfo target = index.getClassByName(DotName.createSimple(targetClass));
+        if (target == null) {
+            return;
+        }
+        for (ShimAnnotationPatch patch : patches) {
+            boolean found = switch (patch.kind) {
+                case CLASS -> true;
+                case FIELD -> target.field(patch.targetName) != null;
+                case METHOD -> target.methods().stream()
+                        .anyMatch(method -> patch.matchesMethod(method.name(), methodDescriptor(method)));
+            };
+            if (!found) {
+                throw new IllegalStateException("@ShimAnnotate template " + patch.sourceRef + " targets "
+                        + patch.kind.name().toLowerCase() + " '" + patch.targetName + "' which does not exist on "
+                        + targetClass + (patch.kind == ShimAnnotationPatch.Kind.METHOD
+                                ? " (with the requested overload, if any)"
+                                : ""));
+            }
+        }
+    }
+
     private static String methodDescriptor(MethodInfo method) {
         StringBuilder sb = new StringBuilder("(");
         for (Type parameter : method.parameterTypes()) {
@@ -296,7 +451,7 @@ public class ShimProcessor {
         return sb.append(')').append(typeDescriptor(method.returnType())).toString();
     }
 
-    private static String typeDescriptor(Type type) {
+    static String typeDescriptor(Type type) {
         switch (type.kind()) {
             case VOID:
                 return "V";
@@ -351,7 +506,11 @@ public class ShimProcessor {
     /** Accumulates all ops, definalize fields and widen flag for one target class. */
     private static final class ClassPlan {
         final List<ShimOp> ops = new ArrayList<>();
+        final List<ShimAnnotationPatch> annotationPatches = new ArrayList<>();
         final Set<String> definalize = new LinkedHashSet<>();
         boolean widenAccess;
+    }
+
+    private record MethodSelector(String descriptor, boolean paramsOnly) {
     }
 }

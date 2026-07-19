@@ -95,6 +95,41 @@ or by raw JVM descriptor:
 @ShimReplace(method = "format", descriptor = "(I)Ljava/lang/String;")  // equivalent
 ```
 
+### Attaching annotations
+
+Put `@ShimAnnotate` on a shim class, method, or field and declare the annotations to copy on
+the same template element:
+
+```java
+@Shim(LegacyService.class)
+@ShimAnnotate
+@Deprecated(since = "shim")
+public class LegacyServiceShim {
+
+    @ShimAnnotate(target = "state")
+    @Deprecated(since = "shim")
+    Object stateAnnotations;
+
+    @ShimAnnotate(target = "run", paramTypes = String.class)
+    @Deprecated(since = "shim")
+    void runAnnotations() {}
+}
+```
+
+On a class, annotations are attached to the target class. On a method or field, `target`
+defaults to the template member's name; method overloads can be selected with `paramTypes` or
+`descriptor`. Annotation values and `RUNTIME`/`CLASS` retention visibility are preserved.
+
+If the target already declares the same annotation type, the shim annotation replaces it by
+default. Set `onConflict = AnnotationConflict.KEEP` to retain the target annotation, or
+`onConflict = AnnotationConflict.FAIL` to fail augmentation instead. `REPLACE` can also be
+specified explicitly.
+
+Attachment is a bytecode transformation, so reflection and other JVM consumers see the
+annotations after augmentation. Quarkus build steps that only read the immutable Jandex index
+do not; `@ShimAnnotate` is therefore not a way to add build-time annotations such as CDI scopes
+or REST endpoints.
+
 ## Reaching private and package-private members
 
 **Private fields and methods** — the JVM enforces private access even at the bytecode level,
@@ -238,7 +273,8 @@ Rules, all enforced at build time:
 ## Modules
 
 - `runtime` (`io.quarkiverse.shim:quarkus-shim`) — the annotation API (`@Shim`, `@ShimBefore`,
-  `@ShimAfter`, `@ShimReplace`) and the `ShimFields` / `ShimMethods` access helpers.
+  `@ShimAfter`, `@ShimReplace`, `@ShimAround`, `@ShimAnnotate`, `AnnotationConflict`) and the
+  `ShimFields` / `ShimMethods` access helpers.
 - `deployment` (`io.quarkiverse.shim:quarkus-shim-deployment`) — Jandex scanning, validation,
   native-image reflection registration, and the ASM class transformer, plus
   `QuarkusExtensionTest`-based tests.
