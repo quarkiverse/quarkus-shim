@@ -5,7 +5,7 @@
     <parent>
         <groupId>io.quarkiverse.shim</groupId>
         <artifactId>quarkus-shim-parent</artifactId>
-        <version>0.2.0</version>
+        <version>999-SNAPSHOT</version>
     </parent>
     <artifactId>quarkus-shim-integration-tests</artifactId>
     <name>Quarkus Shim - Integration Tests</name>
@@ -96,8 +96,4 @@
             </properties>
         </profile>
     </profiles>
-
-  <scm>
-    <tag>0.2.0</tag>
-  </scm>
 </project>
