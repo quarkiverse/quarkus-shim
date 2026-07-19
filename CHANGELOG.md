@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `@ShimAnnotate` for attaching annotations to target classes, methods, and fields during
+  augmentation, including method-overload selection and preservation of annotation values and
+  retention visibility.
+- `AnnotationConflict` policies for existing target annotations: replace them by default, keep
+  them, or fail augmentation with `REPLACE`, `KEEP`, and `FAIL`.
+
 ## 0.1.1 - 2026-07-13
 
 ### Added

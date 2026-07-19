@@ -11,7 +11,8 @@ import java.lang.annotation.Target;
  * The target class is patched at build time: methods annotated with
  * {@link ShimBefore}, {@link ShimAfter}, {@link ShimReplace} or
  * {@link ShimAround} in this class are woven into the target's bytecode during
- * Quarkus augmentation.
+ * Quarkus augmentation. {@link ShimAnnotate} may additionally attach
+ * annotations to the target class and its methods or fields.
  * <p>
  * Specify the target either by class literal ({@link #value()}) or, when the
  * class is not visible from your code, by fully-qualified name

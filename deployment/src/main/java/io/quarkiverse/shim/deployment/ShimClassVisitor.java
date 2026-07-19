@@ -1,10 +1,13 @@
 package io.quarkiverse.shim.deployment;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
+import org.objectweb.asm.AnnotationVisitor;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.Handle;
@@ -12,6 +15,8 @@ import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.MethodNode;
+
+import io.quarkiverse.shim.AnnotationConflict;
 
 /**
  * Applies the collected {@link ShimOp}s to one target class.
@@ -28,20 +33,29 @@ final class ShimClassVisitor extends ClassVisitor {
             false);
 
     private final List<ShimOp> ops;
+    private final List<ShimAnnotationPatch> annotationPatches;
     private final Set<String> definalize;
     private final boolean widenAccess;
     private final Runnable onEnd;
     private final List<AroundPlan> aroundPlans = new ArrayList<>();
     private final List<ReplacementPlan> replacementPlans = new ArrayList<>();
     private final Set<ShimOp> matchedOps = new LinkedHashSet<>();
+    private final Set<ShimAnnotationPatch> matchedAnnotationPatches = new LinkedHashSet<>();
     private final Set<String> matchedDefinalizeFields = new LinkedHashSet<>();
+    private AnnotationOverlay classAnnotationOverlay;
     private String internalName;
     private boolean isInterface;
 
     ShimClassVisitor(ClassVisitor delegate, List<ShimOp> ops, Set<String> definalize, boolean widenAccess,
             Runnable onEnd) {
+        this(delegate, ops, List.of(), definalize, widenAccess, onEnd);
+    }
+
+    ShimClassVisitor(ClassVisitor delegate, List<ShimOp> ops, List<ShimAnnotationPatch> annotationPatches,
+            Set<String> definalize, boolean widenAccess, Runnable onEnd) {
         super(Opcodes.ASM9, delegate);
         this.ops = ops;
+        this.annotationPatches = annotationPatches;
         this.definalize = definalize;
         this.widenAccess = widenAccess;
         this.onEnd = onEnd;
@@ -52,7 +66,13 @@ final class ShimClassVisitor extends ClassVisitor {
             String[] interfaces) {
         internalName = name;
         isInterface = (access & Opcodes.ACC_INTERFACE) != 0;
+        classAnnotationOverlay = overlayForClass(name.replace('/', '.'));
         super.visit(version, access, name, signature, superName, interfaces);
+    }
+
+    @Override
+    public AnnotationVisitor visitAnnotation(String descriptor, boolean visible) {
+        return classAnnotationOverlay.visitExisting(descriptor, visible, super::visitAnnotation);
     }
 
     @Override
@@ -76,12 +96,14 @@ final class ShimClassVisitor extends ClassVisitor {
         if (widenAccess) {
             access = widen(access);
         }
-        return super.visitField(access, name, descriptor, signature, value);
+        FieldVisitor field = super.visitField(access, name, descriptor, signature, value);
+        return annotateField(field, name);
     }
 
     @Override
     public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
             String[] exceptions) {
+        List<ShimAnnotationPatch> annotationPatches = annotationPatchesForMethod(name, descriptor);
         List<ShimOp> matching = new ArrayList<>();
         for (ShimOp op : ops) {
             if (op.matches(name, descriptor)) {
@@ -90,7 +112,9 @@ final class ShimClassVisitor extends ClassVisitor {
             }
         }
         if (matching.isEmpty()) {
-            return super.visitMethod(emittedAccess(access, name), name, descriptor, signature, exceptions);
+            return annotateMethod(
+                    super.visitMethod(emittedAccess(access, name), name, descriptor, signature, exceptions),
+                    annotationPatches, methodRef(name, descriptor));
         }
         if ((access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
             throw new IllegalStateException(
@@ -133,7 +157,9 @@ final class ShimClassVisitor extends ClassVisitor {
                         + internalName.replace('/', '.'));
             }
             boolean hookSelf = validateAround(around, isStatic, descriptor);
-            return captureAround(access, name, descriptor, signature, exceptions, isStatic, around, hookSelf);
+            return annotateMethod(
+                    captureAround(access, name, descriptor, signature, exceptions, isStatic, around, hookSelf),
+                    annotationPatches, methodRef(name, descriptor));
         }
 
         if (replace != null) {
@@ -147,7 +173,7 @@ final class ShimClassVisitor extends ClassVisitor {
             }
             MethodNode original = new MethodNode(Opcodes.ASM9, access, name, descriptor, signature, exceptions);
             replacementPlans.add(new ReplacementPlan(original, isStatic, replace));
-            return original;
+            return annotateMethod(original, annotationPatches, methodRef(name, descriptor));
         }
 
         List<AdviceBinding> before = new ArrayList<>();
@@ -170,7 +196,8 @@ final class ShimClassVisitor extends ClassVisitor {
         after.sort((a, b) -> Integer.compare(a.op.priority, b.op.priority));
         int emitted = emittedAccess(access, name);
         MethodVisitor mv = super.visitMethod(emitted, name, descriptor, signature, exceptions);
-        return new ShimAdviceMethodVisitor(emitted, descriptor, mv, before, after);
+        return annotateMethod(new ShimAdviceMethodVisitor(emitted, descriptor, mv, before, after), annotationPatches,
+                methodRef(name, descriptor));
     }
 
     @Override
@@ -189,6 +216,18 @@ final class ShimClassVisitor extends ClassVisitor {
             throw new IllegalStateException("@Shim definalize lists field '" + missingFields.iterator().next()
                     + "' which does not exist on " + internalName.replace('/', '.'));
         }
+        classAnnotationOverlay.emit(super::visitAnnotation);
+        Set<ShimAnnotationPatch> missingAnnotationPatches = new LinkedHashSet<>(annotationPatches);
+        missingAnnotationPatches.removeAll(matchedAnnotationPatches);
+        if (!missingAnnotationPatches.isEmpty()) {
+            ShimAnnotationPatch missing = missingAnnotationPatches.iterator().next();
+            throw new IllegalStateException("@ShimAnnotate template " + missing.sourceRef + " targets "
+                    + missing.kind.name().toLowerCase() + " '" + missing.targetName + "' which does not exist on "
+                    + internalName.replace('/', '.')
+                    + (missing.kind == ShimAnnotationPatch.Kind.METHOD
+                            ? " (with the requested overload, if any)"
+                            : ""));
+        }
         for (ReplacementPlan plan : replacementPlans) {
             emitReplacement(plan);
         }
@@ -202,6 +241,146 @@ final class ShimClassVisitor extends ClassVisitor {
         if (onEnd != null) {
             onEnd.run();
         }
+    }
+
+    private FieldVisitor annotateField(FieldVisitor visitor, String fieldName) {
+        List<ShimAnnotationPatch> patches = new ArrayList<>();
+        for (ShimAnnotationPatch patch : annotationPatches) {
+            if (patch.matchesField(fieldName)) {
+                matchedAnnotationPatches.add(patch);
+                patches.add(patch);
+            }
+        }
+        if (patches.isEmpty()) {
+            return visitor;
+        }
+        AnnotationOverlay overlay = new AnnotationOverlay(patches,
+                internalName.replace('/', '.') + "#" + fieldName);
+        return new FieldVisitor(Opcodes.ASM9, visitor) {
+            @Override
+            public AnnotationVisitor visitAnnotation(String descriptor, boolean visible) {
+                return overlay.visitExisting(descriptor, visible, super::visitAnnotation);
+            }
+
+            @Override
+            public void visitEnd() {
+                overlay.emit(super::visitAnnotation);
+                super.visitEnd();
+            }
+        };
+    }
+
+    private List<ShimAnnotationPatch> annotationPatchesForMethod(String methodName, String methodDescriptor) {
+        List<ShimAnnotationPatch> patches = new ArrayList<>();
+        for (ShimAnnotationPatch patch : annotationPatches) {
+            if (patch.matchesMethod(methodName, methodDescriptor)) {
+                matchedAnnotationPatches.add(patch);
+                patches.add(patch);
+            }
+        }
+        return patches;
+    }
+
+    private static MethodVisitor annotateMethod(MethodVisitor visitor, List<ShimAnnotationPatch> patches,
+            String targetRef) {
+        if (patches.isEmpty()) {
+            return visitor;
+        }
+        AnnotationOverlay overlay = new AnnotationOverlay(patches, targetRef);
+        return new MethodVisitor(Opcodes.ASM9, visitor) {
+            @Override
+            public AnnotationVisitor visitAnnotation(String descriptor, boolean visible) {
+                return overlay.visitExisting(descriptor, visible, super::visitAnnotation);
+            }
+
+            @Override
+            public void visitEnd() {
+                overlay.emit(super::visitAnnotation);
+                super.visitEnd();
+            }
+        };
+    }
+
+    private AnnotationOverlay overlayForClass(String targetRef) {
+        List<ShimAnnotationPatch> patches = new ArrayList<>();
+        for (ShimAnnotationPatch patch : annotationPatches) {
+            if (patch.kind == ShimAnnotationPatch.Kind.CLASS) {
+                matchedAnnotationPatches.add(patch);
+                patches.add(patch);
+            }
+        }
+        return new AnnotationOverlay(patches, targetRef);
+    }
+
+    private String methodRef(String name, String descriptor) {
+        return internalName.replace('/', '.') + "#" + name + descriptor;
+    }
+
+    private static final class AnnotationOverlay {
+        private final Map<String, PlannedAnnotation> pending = new LinkedHashMap<>();
+        private final String targetRef;
+
+        AnnotationOverlay(List<ShimAnnotationPatch> patches, String targetRef) {
+            this.targetRef = targetRef;
+            for (ShimAnnotationPatch patch : patches) {
+                for (ShimAnnotation annotation : patch.annotations) {
+                    PlannedAnnotation incoming = new PlannedAnnotation(annotation, patch.onConflict, patch.sourceRef);
+                    PlannedAnnotation previous = pending.get(annotation.descriptor);
+                    if (previous == null) {
+                        pending.put(annotation.descriptor, incoming);
+                    } else {
+                        switch (patch.onConflict) {
+                            case REPLACE -> pending.put(annotation.descriptor, incoming);
+                            case KEEP -> {
+                                // The annotation from the earlier shim remains pending.
+                            }
+                            case FAIL -> throw new IllegalStateException("@ShimAnnotate template " + patch.sourceRef
+                                    + " cannot attach " + annotationName(annotation.descriptor) + " to " + targetRef
+                                    + ": another shim template already attaches it (" + previous.sourceRef + ")");
+                        }
+                    }
+                }
+            }
+        }
+
+        AnnotationVisitor visitExisting(String descriptor, boolean visible, AnnotationFactory delegate) {
+            PlannedAnnotation planned = pending.get(descriptor);
+            if (planned == null) {
+                return delegate.create(descriptor, visible);
+            }
+            return switch (planned.onConflict) {
+                case REPLACE -> null;
+                case KEEP -> {
+                    pending.remove(descriptor);
+                    yield delegate.create(descriptor, visible);
+                }
+                case FAIL -> throw new IllegalStateException("@ShimAnnotate template " + planned.sourceRef
+                        + " cannot attach " + annotationName(descriptor) + " to " + targetRef
+                        + ": the target already declares that annotation");
+            };
+        }
+
+        void emit(AnnotationFactory factory) {
+            for (PlannedAnnotation planned : pending.values()) {
+                ShimAnnotation annotation = planned.annotation;
+                AnnotationVisitor visitor = factory.create(annotation.descriptor, annotation.visible);
+                if (visitor != null) {
+                    annotation.accept(visitor);
+                }
+            }
+        }
+
+        private static String annotationName(String descriptor) {
+            return "@" + Type.getType(descriptor).getClassName();
+        }
+    }
+
+    private record PlannedAnnotation(ShimAnnotation annotation, AnnotationConflict onConflict, String sourceRef) {
+    }
+
+    @FunctionalInterface
+    private interface AnnotationFactory {
+        AnnotationVisitor create(String descriptor, boolean visible);
     }
 
     // --- binding resolution --------------------------------------------------
