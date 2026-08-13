@@ -352,15 +352,20 @@ public class ShimProcessor {
 
     private String resolveTargetClass(AnnotationInstance annotation, ClassInfo shimClass) {
         AnnotationValue value = annotation.value();
+        AnnotationValue targetName = annotation.value("targetName");
+        String byName = targetName == null || targetName.asString().isBlank() ? null : targetName.asString();
         if (value != null) {
             String name = value.asClass().name().toString();
             if (!"void".equals(name) && !"java.lang.Void".equals(name)) {
+                if (byName != null && !byName.equals(name)) {
+                    throw new IllegalStateException("@Shim on " + shimClass.name() + " names two different targets:"
+                            + " value() is " + name + " but targetName() is " + byName + "; keep one");
+                }
                 return name;
             }
         }
-        AnnotationValue targetName = annotation.value("targetName");
-        if (targetName != null && !targetName.asString().isBlank()) {
-            return targetName.asString();
+        if (byName != null) {
+            return byName;
         }
         throw new IllegalStateException(
                 "@Shim on " + shimClass.name() + " must specify the class to patch via value() or targetName()");
@@ -738,6 +743,13 @@ public class ShimProcessor {
         }
     }
 
+    /**
+     * The target and every superclass the index knows about, so that members
+     * {@code ShimFields}/{@code ShimMethods} find by walking up are reflectable
+     * in a native image. The walk stops at the first superclass outside the
+     * index — reaching into one of those works on the JVM but not in native, so
+     * it is worth a warning rather than a silent difference.
+     */
     static List<String> reflectionHierarchy(IndexView index, String targetClass) {
         List<String> hierarchy = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
@@ -745,7 +757,15 @@ public class ShimProcessor {
         while (currentName != null && !"java.lang.Object".equals(currentName) && seen.add(currentName)) {
             hierarchy.add(currentName);
             ClassInfo current = index.getClassByName(DotName.createSimple(currentName));
-            if (current == null || current.superName() == null) {
+            if (current == null) {
+                if (!currentName.equals(targetClass)) {
+                    LOG.debugf("Shim: %s is not in the Jandex index, so its members are not registered for"
+                            + " native-image reflection; ShimFields/ShimMethods reaching into it will work on the"
+                            + " JVM but not in a native image", currentName);
+                }
+                break;
+            }
+            if (current.superName() == null) {
                 break;
             }
             currentName = current.superName().toString();
