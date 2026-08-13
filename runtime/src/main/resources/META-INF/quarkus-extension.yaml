@@ -1,11 +1,15 @@
 name: "Shim"
 description: "Patch any Java class at build time - insert, wrap, or replace behavior in code you don't own"
 metadata:
+  guide: "https://docs.quarkiverse.io/quarkus-shim/dev/index.html"
   keywords:
     - "bytecode"
     - "patching"
     - "instrumentation"
     - "shim"
+    - "asm"
+    - "bytecode-transformation"
+    - "monkey-patching"
   categories:
     - "miscellaneous"
   status: "experimental"

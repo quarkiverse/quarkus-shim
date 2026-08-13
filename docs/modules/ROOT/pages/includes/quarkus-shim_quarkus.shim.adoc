@@ -51,6 +51,50 @@ endif::add-copy-button-to-env-var[]
 |boolean
 |`+++false+++`
 
+a|icon:lock[title=Fixed at build time] [[quarkus-shim_quarkus-shim-verify-transformed-classes]] [.property-path]##link:#quarkus-shim_quarkus-shim-verify-transformed-classes[`+++quarkus.shim.verify-transformed-classes+++`]##
+ifdef::add-copy-button-to-config-props[]
+config_property_copy_button:+++quarkus.shim.verify-transformed-classes+++[]
+endif::add-copy-button-to-config-props[]
+
+
+[.description]
+--
+Whether every transformed target class is checked with ASM's `CheckClassAdapter` during the build.
+
+Structural problems in the woven bytecode normally surface as a `ClassFormatError` or `VerifyError` when the class is first loaded, which can be long after the build. Enabling this turns them into a build failure at the point the class is woven, at some cost to build time — useful when developing a shim against an unusual target.
+
+
+ifdef::add-copy-button-to-env-var[]
+Environment variable: env_var_with_copy_button:+++QUARKUS_SHIM_VERIFY_TRANSFORMED_CLASSES+++[]
+endif::add-copy-button-to-env-var[]
+ifndef::add-copy-button-to-env-var[]
+Environment variable: `+++QUARKUS_SHIM_VERIFY_TRANSFORMED_CLASSES+++`
+endif::add-copy-button-to-env-var[]
+--
+|boolean
+|`+++false+++`
+
+a|icon:lock[title=Fixed at build time] [[quarkus-shim_quarkus-shim-report]] [.property-path]##link:#quarkus-shim_quarkus-shim-report[`+++quarkus.shim.report+++`]##
+ifdef::add-copy-button-to-config-props[]
+config_property_copy_button:+++quarkus.shim.report+++[]
+endif::add-copy-button-to-config-props[]
+
+
+[.description]
+--
+Whether a `shim-report.txt` summarising the applied and retired shims is written to the build output directory. Useful for reviewing what a build patched, or for diffing across builds in CI.
+
+
+ifdef::add-copy-button-to-env-var[]
+Environment variable: env_var_with_copy_button:+++QUARKUS_SHIM_REPORT+++[]
+endif::add-copy-button-to-env-var[]
+ifndef::add-copy-button-to-env-var[]
+Environment variable: `+++QUARKUS_SHIM_REPORT+++`
+endif::add-copy-button-to-env-var[]
+--
+|boolean
+|`+++false+++`
+
 a|icon:lock[title=Fixed at build time] [[quarkus-shim_quarkus-shim-instances-instances-enabled]] [.property-path]##link:#quarkus-shim_quarkus-shim-instances-instances-enabled[`+++quarkus.shim.instances."instances".enabled+++`]##
 ifdef::add-copy-button-to-config-props[]
 config_property_copy_button:+++quarkus.shim.instances."instances".enabled+++[]

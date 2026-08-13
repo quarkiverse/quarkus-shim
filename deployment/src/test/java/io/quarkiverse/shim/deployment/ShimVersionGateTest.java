@@ -83,4 +83,28 @@ class ShimVersionGateTest {
         assertEquals("2.0", retired.actualVersion());
         assertTrue(ShimVersionGate.Decision.applied().applies());
     }
+
+    @Test
+    void aQualifierSortsBelowTheReleaseItPrecedes() {
+        // documented behaviour: a pre-release is inside the range that ends at
+        // its release, and outside the range that starts there
+        assertTrue(matches("[1.2,1.5)", "1.5-SNAPSHOT"));
+        assertFalse(matches("[1.5,)", "1.5-SNAPSHOT"));
+        assertTrue(matches("[1.5,)", "1.5"));
+    }
+
+    @Test
+    void aBareVersionMeansExactlyThatVersion() {
+        assertTrue(matches("1.4.2", "1.4.2"));
+        assertFalse(matches("1.4.2", "1.4.3"));
+        assertFalse(matches("1.4.2", "1.4.2-SNAPSHOT"));
+    }
+
+    @Test
+    void anInvalidRangeIsReportedAgainstTheShimThatDeclaredIt() {
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> matches("[1.2", "1.3"));
+        assertTrue(failure.getMessage().contains("com.acme.FooShim"), failure.getMessage());
+        assertTrue(failure.getMessage().contains("invalid version range"), failure.getMessage());
+    }
 }

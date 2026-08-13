@@ -39,6 +39,10 @@ final class ShimVersionGate {
             return new Decision(true, "", "", "");
         }
 
+        static Decision applied(String coordinates, String actualVersion) {
+            return new Decision(true, coordinates, actualVersion, "");
+        }
+
         static Decision retired(String coordinates, String actualVersion, String reason) {
             return new Decision(false, coordinates, actualVersion, reason);
         }
@@ -69,20 +73,28 @@ final class ShimVersionGate {
             coordinates = resolved.getGroupId() + ":" + resolved.getArtifactId();
         }
         if (versions.isBlank()) {
-            return Decision.applied();
+            // presence gate: the dependency is here, which is all that was asked
+            return Decision.applied(coordinates, actual == null ? "" : actual);
         }
         if (actual == null || actual.isBlank()) {
             throw new IllegalStateException("@Shim on " + shimClass + " is pinned to versions '" + versions
                     + "' but no version could be resolved for " + coordinates);
         }
         if (matches(shimClass, versions, actual)) {
-            return Decision.applied();
+            return Decision.applied(coordinates, actual);
         }
         return Decision.retired(coordinates, actual,
                 coordinates + " is at " + actual + ", outside the pinned range '" + versions + "'");
     }
 
-    /** Whether {@code version} falls inside the {@code versions} specification. */
+    /**
+     * Whether {@code version} falls inside the {@code versions} specification.
+     * <p>
+     * Comparison is Maven's, so a qualifier sorts below the release it precedes:
+     * {@code 1.5-SNAPSHOT} is inside {@code [1.2,1.5)} and outside
+     * {@code [1.5,)}. Pin with that in mind when a patch must retire before the
+     * release it was written against ships.
+     */
     static boolean matches(String shimClass, String versions, String version) {
         VersionRange range;
         try {
@@ -102,13 +114,18 @@ final class ShimVersionGate {
     }
 
     private ResolvedDependency findDependency(String coordinates) {
-        int separator = coordinates.indexOf(':');
-        String groupId = coordinates.substring(0, separator);
-        String artifactId = coordinates.substring(separator + 1);
+        String[] segments = coordinates.split(":", -1);
+        String groupId = segments[0];
+        String artifactId = segments[1];
+        String classifier = segments.length > 2 ? segments[2] : null;
         for (ResolvedDependency dependency : model.getDependencies()) {
-            if (groupId.equals(dependency.getGroupId()) && artifactId.equals(dependency.getArtifactId())) {
-                return dependency;
+            if (!groupId.equals(dependency.getGroupId()) || !artifactId.equals(dependency.getArtifactId())) {
+                continue;
             }
+            if (classifier != null && !classifier.equals(dependency.getClassifier())) {
+                continue;
+            }
+            return dependency;
         }
         ResolvedDependency application = model.getAppArtifact();
         if (application != null && groupId.equals(application.getGroupId())
@@ -120,23 +137,44 @@ final class ShimVersionGate {
 
     private ResolvedDependency containingDependency(String shimClass, String targetClass) {
         ApplicationArchive archive = archives.containingArchive(targetClass);
-        ResolvedDependency resolved = archive == null ? null : archive.getResolvedDependency();
+        if (archive == null) {
+            throw new IllegalStateException("@Shim on " + shimClass
+                    + " is pinned to a version, but no application archive contains " + targetClass
+                    + " — the class may live in a dependency without a Jandex index."
+                    + " Index it, or name the artifact explicitly with dependency = \"groupId:artifactId\"");
+        }
+        ResolvedDependency resolved = archive.getResolvedDependency();
         if (resolved == null) {
             throw new IllegalStateException("@Shim on " + shimClass
-                    + " is pinned to a version range, but the artifact containing " + targetClass
-                    + " could not be determined (the class may live in a dependency without a Jandex index)."
-                    + " Name it explicitly with dependency = \"groupId:artifactId\"");
+                    + " is pinned to a version, but the archive containing " + targetClass
+                    + " has no Maven coordinates to read a version from (it is typically the application's own"
+                    + " classes). Name the artifact explicitly with dependency = \"groupId:artifactId\"");
         }
         return resolved;
     }
 
+    /**
+     * Accepts {@code groupId:artifactId} with an optional {@code :classifier},
+     * trimming each segment so an incidental space does not silently retire the
+     * shim by failing to match any dependency.
+     */
     private static String normalizeKey(String shimClass, String dependency) {
-        String trimmed = dependency.trim();
-        int separator = trimmed.indexOf(':');
-        if (separator <= 0 || separator == trimmed.length() - 1 || trimmed.indexOf(':', separator + 1) >= 0) {
-            throw new IllegalStateException("@Shim on " + shimClass + " declares dependency '" + dependency
-                    + "'; expected the form \"groupId:artifactId\" (put the version in versions())");
+        String[] segments = dependency.split(":", -1);
+        boolean wellFormed = segments.length == 2 || segments.length == 3;
+        if (wellFormed) {
+            for (int i = 0; i < segments.length; i++) {
+                segments[i] = segments[i].trim();
+                // only the classifier may be empty, meaning "the default artifact"
+                if (segments[i].isEmpty() && i < 2) {
+                    wellFormed = false;
+                }
+            }
         }
-        return trimmed;
+        if (!wellFormed) {
+            throw new IllegalStateException("@Shim on " + shimClass + " declares dependency '" + dependency
+                    + "'; expected \"groupId:artifactId\" or \"groupId:artifactId:classifier\""
+                    + " (put the version in versions())");
+        }
+        return String.join(":", segments);
     }
 }

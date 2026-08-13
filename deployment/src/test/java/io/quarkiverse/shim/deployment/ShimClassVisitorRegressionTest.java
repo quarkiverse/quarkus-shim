@@ -22,6 +22,7 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import org.objectweb.asm.util.CheckClassAdapter;
 
 import io.quarkiverse.shim.ShimCall;
 
@@ -116,10 +117,16 @@ class ShimClassVisitorRegressionTest {
         return new ShimOp(kind, 0, targetMethod, "()I", false, HOOK_OWNER, hookMethod, hookDescriptor, "test");
     }
 
+    /**
+     * Every transform in this class is checked with {@link CheckClassAdapter},
+     * so a malformed visitor call sequence or an illegal instruction fails the
+     * test here rather than as a ClassFormatError when the class is loaded.
+     */
     private static byte[] transform(byte[] input, List<ShimOp> ops, Set<String> definalize, boolean widen) {
         ClassReader reader = new ClassReader(input);
         ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-        reader.accept(new ShimClassVisitor(writer, ops, definalize, widen, null), ClassReader.EXPAND_FRAMES);
+        reader.accept(new ShimClassVisitor(new CheckClassAdapter(writer, false), ops, definalize, widen, null),
+                ClassReader.EXPAND_FRAMES);
         return writer.toByteArray();
     }
 

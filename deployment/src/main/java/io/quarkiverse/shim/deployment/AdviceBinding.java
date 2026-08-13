@@ -12,11 +12,18 @@ final class AdviceBinding {
     final boolean self;
     final int argCount;
     final boolean returned;
+    /** For a {@code @ShimCatch} hook, whether it receives the exception being thrown. */
+    final boolean throwable;
 
     AdviceBinding(ShimOp op, boolean self, int argCount, boolean returned) {
+        this(op, self, argCount, returned, false);
+    }
+
+    AdviceBinding(ShimOp op, boolean self, int argCount, boolean returned, boolean throwable) {
         this.op = op;
         this.self = self;
         this.argCount = argCount;
         this.returned = returned;
+        this.throwable = throwable;
     }
 }

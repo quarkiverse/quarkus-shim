@@ -12,7 +12,9 @@ final class ShimOp {
         BEFORE,
         AFTER,
         REPLACE,
-        AROUND
+        AROUND,
+        CATCH,
+        FINALLY
     }
 
     final Kind kind;
@@ -28,11 +30,22 @@ final class ShimOp {
     final String shimOwnerInternalName;
     final String shimMethodName;
     final String shimMethodDescriptor;
+    /** Whether the hook is declared on an interface, so its call site needs an InterfaceMethodref. */
+    final boolean shimOwnerIsInterface;
+    /** For {@link Kind#CATCH}, the internal name of the exception type to handle. */
+    String caughtExceptionInternalName = "java/lang/Throwable";
     /** The shim class simple/logical name, for diagnostics. */
     final String shimName;
 
     ShimOp(Kind kind, int priority, String targetMethodName, String targetMethodDescriptor, boolean matchParamsOnly,
             String shimOwnerInternalName, String shimMethodName, String shimMethodDescriptor, String shimName) {
+        this(kind, priority, targetMethodName, targetMethodDescriptor, matchParamsOnly, shimOwnerInternalName,
+                shimMethodName, shimMethodDescriptor, false, shimName);
+    }
+
+    ShimOp(Kind kind, int priority, String targetMethodName, String targetMethodDescriptor, boolean matchParamsOnly,
+            String shimOwnerInternalName, String shimMethodName, String shimMethodDescriptor,
+            boolean shimOwnerIsInterface, String shimName) {
         this.kind = kind;
         this.priority = priority;
         this.targetMethodName = targetMethodName;
@@ -41,7 +54,13 @@ final class ShimOp {
         this.shimOwnerInternalName = shimOwnerInternalName;
         this.shimMethodName = shimMethodName;
         this.shimMethodDescriptor = shimMethodDescriptor;
+        this.shimOwnerIsInterface = shimOwnerIsInterface;
         this.shimName = shimName;
+    }
+
+    /** Whether this op names one exact overload, rather than matching every overload of the name. */
+    boolean pinsExactDescriptor() {
+        return !targetMethodDescriptor.isEmpty();
     }
 
     boolean matches(String methodName, String methodDescriptor) {

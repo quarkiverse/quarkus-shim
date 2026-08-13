@@ -1,8 +1,11 @@
 package io.quarkiverse.shim.deployment;
 
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.reflect.Modifier;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -21,6 +24,8 @@ import org.jboss.jandex.MethodInfo;
 import org.jboss.jandex.Type;
 import org.jboss.logging.Logger;
 import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.util.CheckClassAdapter;
 import org.objectweb.asm.util.TraceClassVisitor;
 
 import io.quarkiverse.shim.AnnotationConflict;
@@ -37,6 +42,7 @@ import io.quarkus.deployment.builditem.CombinedIndexBuildItem;
 import io.quarkus.deployment.builditem.FeatureBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.ReflectiveClassBuildItem;
 import io.quarkus.deployment.pkg.builditem.CurateOutcomeBuildItem;
+import io.quarkus.deployment.pkg.builditem.OutputTargetBuildItem;
 import io.quarkus.devui.spi.page.CardPageBuildItem;
 import io.quarkus.devui.spi.page.Page;
 
@@ -50,15 +56,39 @@ public class ShimProcessor {
 
     private static final String FEATURE = "shim";
 
+    private static final String OBJECT_DESCRIPTOR = "Ljava/lang/Object;";
+
+    /**
+     * Shim weaves whole method bodies, so it wants to see the class after every
+     * other extension has had its turn. Quarkus applies transformers in
+     * ascending priority, so a high value puts shim last.
+     */
+    private static final int SHIM_TRANSFORMER_PRIORITY = 1000;
+
+    /**
+     * Compiler-generated members. Bridge methods delegate to the real method,
+     * so weaving or annotating them duplicates the effect and makes it depend
+     * on the caller's static type; they are only ever matched when a shim pins
+     * their exact descriptor.
+     */
+    private static final int SYNTHETIC_MEMBER = Opcodes.ACC_SYNTHETIC | Opcodes.ACC_BRIDGE;
+
+    static boolean isCompilerGenerated(MethodInfo method) {
+        return (method.flags() & SYNTHETIC_MEMBER) != 0;
+    }
+
     private static final DotName SHIM = DotName.createSimple("io.quarkiverse.shim.Shim");
     private static final DotName SHIM_BEFORE = DotName.createSimple("io.quarkiverse.shim.ShimBefore");
     private static final DotName SHIM_AFTER = DotName.createSimple("io.quarkiverse.shim.ShimAfter");
     private static final DotName SHIM_REPLACE = DotName.createSimple("io.quarkiverse.shim.ShimReplace");
     private static final DotName SHIM_AROUND = DotName.createSimple("io.quarkiverse.shim.ShimAround");
+    private static final DotName SHIM_CATCH = DotName.createSimple("io.quarkiverse.shim.ShimCatch");
+    private static final DotName SHIM_FINALLY = DotName.createSimple("io.quarkiverse.shim.ShimFinally");
     private static final DotName SHIM_PRIORITY = DotName.createSimple("io.quarkiverse.shim.ShimPriority");
     private static final DotName SHIM_ANNOTATE = DotName.createSimple("io.quarkiverse.shim.ShimAnnotate");
     private static final Set<DotName> SHIM_CONTROL_ANNOTATIONS = Set.of(
-            SHIM, SHIM_BEFORE, SHIM_AFTER, SHIM_REPLACE, SHIM_AROUND, SHIM_PRIORITY, SHIM_ANNOTATE);
+            SHIM, SHIM_BEFORE, SHIM_AFTER, SHIM_REPLACE, SHIM_AROUND, SHIM_CATCH, SHIM_FINALLY, SHIM_PRIORITY,
+            SHIM_ANNOTATE);
 
     @BuildStep
     FeatureBuildItem feature() {
@@ -70,6 +100,7 @@ public class ShimProcessor {
             CombinedIndexBuildItem combinedIndex,
             CurateOutcomeBuildItem curateOutcome,
             ApplicationArchivesBuildItem archives,
+            OutputTargetBuildItem outputTarget,
             BuildProducer<BytecodeTransformerBuildItem> transformers,
             BuildProducer<ReflectiveClassBuildItem> reflectiveClasses,
             BuildProducer<AppliedShimsBuildItem> applied) {
@@ -83,9 +114,20 @@ public class ShimProcessor {
         ShimVersionGate gate = new ShimVersionGate(curateOutcome, archives);
         List<Map<String, String>> retiredRows = new ArrayList<>();
 
+        Map<String, String> claimedNames = new LinkedHashMap<>();
+        Set<String> declaredNames = new LinkedHashSet<>();
+
         for (AnnotationInstance shimAnnotation : index.getAnnotations(SHIM)) {
             ClassInfo shimClass = shimAnnotation.target().asClass();
             String shimName = resolveShimName(shimAnnotation, shimClass);
+            declaredNames.add(shimName);
+            String previousOwner = claimedNames.putIfAbsent(shimName, shimClass.name().toString());
+            if (previousOwner != null) {
+                throw new IllegalStateException("Two shims share the name '" + shimName + "': " + previousOwner
+                        + " and " + shimClass.name()
+                        + ". The name keys quarkus.shim.instances.\"" + shimName + "\".enabled, so they could not be"
+                        + " configured apart; give at least one an explicit @Shim(name = ...)");
+            }
             if (!isInstanceEnabled(config, shimName)) {
                 LOG.infof("Shim '%s' is disabled via configuration; skipping %s", shimName, shimClass.name());
                 continue;
@@ -108,6 +150,7 @@ public class ShimProcessor {
             }
 
             ClassPlan plan = plans.computeIfAbsent(targetClass, k -> new ClassPlan());
+            plan.shimClasses.add(shimClass.name().toString());
 
             AnnotationValue definalizeValue = shimAnnotation.value("definalize");
             if (definalizeValue != null) {
@@ -123,6 +166,8 @@ public class ShimProcessor {
                 collectOp(hook, targetClass, shimName, SHIM_AFTER, ShimOp.Kind.AFTER, plan.ops);
                 collectOp(hook, targetClass, shimName, SHIM_REPLACE, ShimOp.Kind.REPLACE, plan.ops);
                 collectOp(hook, targetClass, shimName, SHIM_AROUND, ShimOp.Kind.AROUND, plan.ops);
+                collectOp(hook, targetClass, shimName, SHIM_CATCH, ShimOp.Kind.CATCH, plan.ops);
+                collectOp(hook, targetClass, shimName, SHIM_FINALLY, ShimOp.Kind.FINALLY, plan.ops);
                 collectMethodAnnotationPatch(hook, shimName, plan.annotationPatches);
             }
             for (FieldInfo field : shimClass.fields()) {
@@ -130,10 +175,18 @@ public class ShimProcessor {
             }
         }
 
+        warnAboutUnknownInstances(config, declaredNames);
+
         List<Map<String, String>> rows = new ArrayList<>();
         for (Map.Entry<String, ClassPlan> entry : plans.entrySet()) {
             String targetClass = entry.getKey();
             ClassPlan plan = entry.getValue();
+            if (plan.isEmpty()) {
+                LOG.warnf("@Shim targets %s but declares no hooks, no @ShimAnnotate template, no definalize entry"
+                        + " and no widenAccess; nothing will be woven", targetClass);
+                continue;
+            }
+            validateTargetIsTransformable(index, archives, targetClass, plan);
             validateExistence(index, targetClass, plan.ops);
             validateDefinalize(index, targetClass, plan.definalize);
             validateAnnotationTargets(index, targetClass, plan.annotationPatches);
@@ -144,18 +197,30 @@ public class ShimProcessor {
             boolean widen = plan.widenAccess;
             boolean dump = config.dumpTransformedClasses();
 
+            boolean verify = config.verifyTransformedClasses();
+            Path dumpDir = outputTarget.getOutputDirectory().resolve("shim");
+
             transformers.produce(new BytecodeTransformerBuildItem.Builder()
                     .setClassToTransform(targetClass)
                     // LocalVariablesSorter (used for @ShimAfter return-value locals) needs expanded frames
                     .setClassReaderOptions(org.objectweb.asm.ClassReader.EXPAND_FRAMES)
+                    // Run last, so the class shim sees is the one every other
+                    // extension has already finished with. Pinning this keeps
+                    // the chain position deliberate rather than incidental.
+                    .setPriority(SHIM_TRANSFORMER_PRIORITY)
                     .setVisitorFunction((className, outputVisitor) -> {
+                        ClassVisitor downstream = verify ? new CheckClassAdapter(outputVisitor, false) : outputVisitor;
                         if (dump) {
                             StringWriter sw = new StringWriter();
-                            ClassVisitor trace = new TraceClassVisitor(outputVisitor, new PrintWriter(sw));
-                            return new ShimClassVisitor(trace, ops, annotationPatches, definalize, widen,
-                                    () -> ShimDump.write(className, sw.toString()));
+                            ClassVisitor trace = new TraceClassVisitor(downstream, new PrintWriter(sw));
+                            // dump from the visitor itself rather than only on a
+                            // clean visitEnd, so a weave that fails validation
+                            // still leaves behind the trace explaining why
+                            return new ShimDump.Dumping(
+                                    new ShimClassVisitor(trace, ops, annotationPatches, definalize, widen, null),
+                                    dumpDir, className, sw);
                         }
-                        return new ShimClassVisitor(outputVisitor, ops, annotationPatches, definalize, widen, null);
+                        return new ShimClassVisitor(downstream, ops, annotationPatches, definalize, widen, null);
                     })
                     .build());
             // make ShimFields/ShimMethods reflection work in native image, including
@@ -173,7 +238,36 @@ public class ShimProcessor {
                 LOG.infof("Shim: %s", patch.describe(targetClass));
             }
         }
-        applied.produce(new AppliedShimsBuildItem(rows, retiredRows));
+        AppliedShimsBuildItem result = new AppliedShimsBuildItem(rows, retiredRows);
+        if (config.report()) {
+            writeReport(result, outputTarget.getOutputDirectory().resolve("shim-report.txt"));
+        }
+        applied.produce(result);
+    }
+
+    /**
+     * Writes a summary of what was woven and what was held back, so a reviewer
+     * or a CI job can diff it across builds instead of scraping the log.
+     */
+    private static void writeReport(AppliedShimsBuildItem applied, Path file) {
+        String newline = System.lineSeparator();
+        StringBuilder report = new StringBuilder();
+        report.append("# quarkus-shim build report").append(newline).append(newline);
+        report.append("applied: ").append(applied.getRows().size()).append(newline);
+        for (String description : applied.getDescriptions()) {
+            report.append("  ").append(description).append(newline);
+        }
+        report.append(newline).append("retired: ").append(applied.getRetiredRows().size()).append(newline);
+        for (String description : applied.getRetiredDescriptions()) {
+            report.append("  ").append(description).append(newline);
+        }
+        try {
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, report.toString());
+            LOG.infof("Shim: wrote %s", file);
+        } catch (IOException | RuntimeException e) {
+            LOG.warnf("Shim: could not write %s: %s", file, e.toString());
+        }
     }
 
     @BuildStep
@@ -258,15 +352,20 @@ public class ShimProcessor {
 
     private String resolveTargetClass(AnnotationInstance annotation, ClassInfo shimClass) {
         AnnotationValue value = annotation.value();
+        AnnotationValue targetName = annotation.value("targetName");
+        String byName = targetName == null || targetName.asString().isBlank() ? null : targetName.asString();
         if (value != null) {
             String name = value.asClass().name().toString();
             if (!"void".equals(name) && !"java.lang.Void".equals(name)) {
+                if (byName != null && !byName.equals(name)) {
+                    throw new IllegalStateException("@Shim on " + shimClass.name() + " names two different targets:"
+                            + " value() is " + name + " but targetName() is " + byName + "; keep one");
+                }
                 return name;
             }
         }
-        AnnotationValue targetName = annotation.value("targetName");
-        if (targetName != null && !targetName.asString().isBlank()) {
-            return targetName.asString();
+        if (byName != null) {
+            return byName;
         }
         throw new IllegalStateException(
                 "@Shim on " + shimClass.name() + " must specify the class to patch via value() or targetName()");
@@ -282,9 +381,10 @@ public class ShimProcessor {
         if (!Modifier.isStatic(hook.flags())) {
             throw new IllegalStateException("Shim hook " + hookRef + " must be static");
         }
-        if ((kind == ShimOp.Kind.BEFORE || kind == ShimOp.Kind.AFTER)
+        validateHookIsReachable(hook, hookRef, targetClass);
+        if (kind != ShimOp.Kind.REPLACE && kind != ShimOp.Kind.AROUND
                 && hook.returnType().kind() != Type.Kind.VOID) {
-            throw new IllegalStateException("@ShimBefore/@ShimAfter hook " + hookRef + " must return void");
+            throw new IllegalStateException("@Shim" + capitalize(kind) + " hook " + hookRef + " must return void");
         }
         String targetMethod = annotation.value("method").asString();
 
@@ -315,9 +415,51 @@ public class ShimProcessor {
             priority = priorityAnnotation.value().asInt();
         }
 
-        ops.add(new ShimOp(kind, priority, targetMethod, filter, paramsOnly,
+        ShimOp op = new ShimOp(kind, priority, targetMethod, filter, paramsOnly,
                 hook.declaringClass().name().toString().replace('.', '/'),
-                hook.name(), methodDescriptor(hook), shimName));
+                hook.name(), methodDescriptor(hook), Modifier.isInterface(hook.declaringClass().flags()), shimName);
+        if (kind == ShimOp.Kind.CATCH) {
+            AnnotationValue exception = annotation.value("exception");
+            if (exception != null) {
+                op.caughtExceptionInternalName = exception.asClass().name().toString().replace('.', '/');
+            }
+        }
+        ops.add(op);
+    }
+
+    private static String capitalize(ShimOp.Kind kind) {
+        String name = kind.name().toLowerCase();
+        return Character.toUpperCase(name.charAt(0)) + name.substring(1);
+    }
+
+    /**
+     * The hook is invoked from the target class's own bytecode, so it must be
+     * reachable from there. javac never sees that call site, so nothing else
+     * catches a hook the target cannot call — it would surface as an
+     * {@link IllegalAccessError} on the first invocation instead.
+     */
+    private static void validateHookIsReachable(MethodInfo hook, String hookRef, String targetClass) {
+        String hookPackage = hook.declaringClass().name().packagePrefix();
+        String targetPackage = packagePrefixOf(targetClass);
+        boolean samePackage = hookPackage == null ? targetPackage == null : hookPackage.equals(targetPackage);
+        if (samePackage) {
+            return;
+        }
+        if (!Modifier.isPublic(hook.flags())) {
+            throw new IllegalStateException("Shim hook " + hookRef + " must be public: it is invoked from "
+                    + targetClass + ", which is in a different package"
+                    + " (or move the shim into the target's package)");
+        }
+        if (!Modifier.isPublic(hook.declaringClass().flags())) {
+            throw new IllegalStateException("Shim class " + hook.declaringClass().name()
+                    + " must be public: its hooks are invoked from " + targetClass
+                    + ", which is in a different package");
+        }
+    }
+
+    private static String packagePrefixOf(String className) {
+        int lastDot = className.lastIndexOf('.');
+        return lastDot < 0 ? null : className.substring(0, lastDot);
     }
 
     private void collectClassAnnotationPatch(ClassInfo shimClass, String shimName,
@@ -376,7 +518,9 @@ public class ShimProcessor {
                 .toList();
         if (annotations.isEmpty()) {
             throw new IllegalStateException("@ShimAnnotate on " + sourceRef
-                    + " has no non-Shim annotations to attach");
+                    + " has no annotations to attach. Note that only annotations with CLASS or RUNTIME retention"
+                    + " reach the class file — a RetentionPolicy.SOURCE annotation is discarded by javac and"
+                    + " cannot be copied");
         }
         return annotations;
     }
@@ -427,6 +571,46 @@ public class ShimProcessor {
     }
 
     /**
+     * Quarkus can only transform a class it can locate in an application
+     * archive; for anything else {@code ClassTransformingBuildStep} logs
+     * "Cannot transform ..." and moves on. Without this check the shim is
+     * reported as applied while the target keeps its original bytecode - which
+     * is exactly what a typo in {@code targetName} looks like.
+     */
+    private void validateTargetIsTransformable(IndexView index, ApplicationArchivesBuildItem archives,
+            String targetClass, ClassPlan plan) {
+        if (archives.containingArchive(targetClass) != null) {
+            return;
+        }
+        boolean indexed = index.getClassByName(DotName.createSimple(targetClass)) != null;
+        String culprits = plan.shimClasses.isEmpty() ? "" : " (declared by " + String.join(", ", plan.shimClasses) + ")";
+        throw new IllegalStateException("@Shim targets " + targetClass + culprits
+                + ", which is not in any application archive, so it cannot be transformed"
+                + (indexed
+                        ? ". The class is indexed but its archive has no transformable form"
+                        : ". Check the spelling, and note that a class in a dependency without a Jandex index"
+                                + " cannot be patched - index it with the Jandex plugin or"
+                                + " quarkus.index-dependency.*")
+                + ". Nothing would have been woven, so the build fails rather than report a patch that"
+                + " was never applied");
+    }
+
+    /**
+     * A configured instance name that matches no shim is almost always a typo,
+     * and silently doing nothing is the worst possible outcome for a key whose
+     * whole job is to turn a patch off.
+     */
+    private static void warnAboutUnknownInstances(ShimBuildTimeConfig config, Set<String> declaredNames) {
+        for (String configured : config.instances().keySet()) {
+            if (!declaredNames.contains(configured)) {
+                LOG.warnf("Configuration names shim '%s' (quarkus.shim.instances.\"%s\".*) but no @Shim declares"
+                        + " that name; known shims: %s", configured, configured,
+                        declaredNames.isEmpty() ? "(none)" : String.join(", ", declaredNames));
+            }
+        }
+    }
+
+    /**
      * When the target class is part of the application index we can fail the
      * build with a precise message instead of erroring later. Targets outside
      * the index (e.g. unindexed dependencies) are validated by the transformer.
@@ -437,7 +621,11 @@ public class ShimProcessor {
             return;
         }
         for (ShimOp op : ops) {
+            // filter by name before building any descriptor: an unrelated method
+            // must never be able to fail the build for a shim that never named it
             boolean found = target.methods().stream()
+                    .filter(m -> op.targetMethodName.equals(m.name()))
+                    .filter(m -> !isCompilerGenerated(m) || op.pinsExactDescriptor())
                     .anyMatch(m -> op.matches(m.name(), methodDescriptor(m)));
             if (!found) {
                 if ("<clinit>".equals(op.targetMethodName)) {
@@ -479,6 +667,8 @@ public class ShimProcessor {
                 case CLASS -> true;
                 case FIELD -> target.field(patch.targetName) != null;
                 case METHOD -> target.methods().stream()
+                        .filter(method -> patch.targetName.equals(method.name()))
+                        .filter(method -> !isCompilerGenerated(method) || patch.pinsExactDescriptor())
                         .anyMatch(method -> patch.matchesMethod(method.name(), methodDescriptor(method)));
             };
             if (!found) {
@@ -491,9 +681,20 @@ public class ShimProcessor {
         }
     }
 
+    /**
+     * The descriptor the JVM actually sees for {@code method}.
+     * <p>
+     * {@link MethodInfo#descriptorParameterTypes()} is used rather than
+     * {@code parameterTypes()} because the latter reports the parameters as
+     * they were written in source: it omits the synthetic leading parameters
+     * javac adds to enum constructors ({@code String}, {@code int}) and to
+     * inner-class constructors (the enclosing instance), and it keeps type
+     * variables unerased. Both would produce a descriptor that never matches
+     * the one the transformer is handed.
+     */
     private static String methodDescriptor(MethodInfo method) {
         StringBuilder sb = new StringBuilder("(");
-        for (Type parameter : method.parameterTypes()) {
+        for (Type parameter : method.descriptorParameterTypes()) {
             sb.append(typeDescriptor(parameter));
         }
         return sb.append(')').append(typeDescriptor(method.returnType())).toString();
@@ -530,12 +731,25 @@ public class ShimProcessor {
             case CLASS:
             case PARAMETERIZED_TYPE:
                 return "L" + type.name().toString().replace('.', '/') + ";";
+            case TYPE_VARIABLE:
+                // erasure: the first bound, or Object for an unbounded variable
+                List<Type> bounds = type.asTypeVariable().bounds();
+                return bounds.isEmpty() ? OBJECT_DESCRIPTOR : typeDescriptor(bounds.get(0));
+            case UNRESOLVED_TYPE_VARIABLE:
+            case TYPE_VARIABLE_REFERENCE:
+                return OBJECT_DESCRIPTOR;
             default:
-                throw new IllegalStateException(
-                        "Unsupported type in shim hook signature (no generics/type variables): " + type);
+                throw new IllegalStateException("Unsupported type in a shim signature: " + type);
         }
     }
 
+    /**
+     * The target and every superclass the index knows about, so that members
+     * {@code ShimFields}/{@code ShimMethods} find by walking up are reflectable
+     * in a native image. The walk stops at the first superclass outside the
+     * index — reaching into one of those works on the JVM but not in native, so
+     * it is worth a warning rather than a silent difference.
+     */
     static List<String> reflectionHierarchy(IndexView index, String targetClass) {
         List<String> hierarchy = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
@@ -543,7 +757,15 @@ public class ShimProcessor {
         while (currentName != null && !"java.lang.Object".equals(currentName) && seen.add(currentName)) {
             hierarchy.add(currentName);
             ClassInfo current = index.getClassByName(DotName.createSimple(currentName));
-            if (current == null || current.superName() == null) {
+            if (current == null) {
+                if (!currentName.equals(targetClass)) {
+                    LOG.debugf("Shim: %s is not in the Jandex index, so its members are not registered for"
+                            + " native-image reflection; ShimFields/ShimMethods reaching into it will work on the"
+                            + " JVM but not in a native image", currentName);
+                }
+                break;
+            }
+            if (current.superName() == null) {
                 break;
             }
             currentName = current.superName().toString();
@@ -556,7 +778,13 @@ public class ShimProcessor {
         final List<ShimOp> ops = new ArrayList<>();
         final List<ShimAnnotationPatch> annotationPatches = new ArrayList<>();
         final Set<String> definalize = new LinkedHashSet<>();
+        /** Which @Shim classes contributed to this plan, for diagnostics. */
+        final Set<String> shimClasses = new LinkedHashSet<>();
         boolean widenAccess;
+
+        boolean isEmpty() {
+            return ops.isEmpty() && annotationPatches.isEmpty() && definalize.isEmpty() && !widenAccess;
+        }
     }
 
     private record MethodSelector(String descriptor, boolean paramsOnly) {

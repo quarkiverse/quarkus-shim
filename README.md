@@ -12,6 +12,17 @@ agent, no runtime instrumentation.
 > Note: "shim" here means *modifying existing behavior* in classes you can't edit — not a
 > JS-style compatibility polyfill.
 
+The six kinds of hook:
+
+| | |
+|---|---|
+| `@ShimBefore`  | run code at method entry; may receive `self` and a prefix of the arguments |
+| `@ShimAfter`   | run code before every normal return; may receive `self` and the returned value |
+| `@ShimCatch`   | run code when the method exits by throwing; may receive `self` and the exception |
+| `@ShimFinally` | run code however the method exits; may receive `self` |
+| `@ShimReplace` | replace the method body entirely |
+| `@ShimAround`  | wrap the method — call the original via `ShimCall`, transforming args/result |
+
 ## Installation
 
 Add the extension to your Quarkus application. With Maven, add the following dependency to
@@ -86,6 +97,44 @@ public static String greet(ShimCall<String> original, Greeter self, String name)
     return original.proceed().toUpperCase();   // run the real greet, then transform the result
 }
 ```
+
+`ShimCall.proceed()` reruns the original with the arguments the target was called with;
+`proceed(...)` runs it with replacements, which is how a hook rewrites what the target sees:
+
+```java
+@ShimAround(method = "connect")
+public static Conn connect(ShimCall<Conn> original, Client self, String url, int timeoutMs) {
+    return original.proceed(url, Math.max(timeoutMs, 5_000));   // clamp a bad default
+}
+```
+
+### Reacting to failures
+
+`@ShimAfter` deliberately skips the throwing path. To observe a failure, use `@ShimCatch`; to run
+on both paths, use `@ShimFinally`. Both are `static void`, and both take an optional `self`;
+`@ShimCatch` may also take the exception:
+
+```java
+@Shim(FlakyClient.class)
+public class FlakyClientShim {
+
+    // the exception is rethrown unchanged once the hook returns
+    @ShimCatch(method = "send", exception = IOException.class)
+    public static void onFailure(FlakyClient self, IOException failure) {
+        Metrics.counter("flaky.send.failures").increment();
+    }
+
+    @ShimFinally(method = "send")
+    public static void always(FlakyClient self) {
+        ShimFields.<Semaphore> get(self, "inFlight").release();
+    }
+}
+```
+
+The target's own `catch` blocks keep priority: an exception the method already handles itself
+never reaches `@ShimCatch`, while `@ShimFinally` still runs because the method returns normally.
+Neither can target a constructor — a handler covering the constructor body could observe `this`
+before `super()` has run, which the verifier rejects.
 
 When a method name is overloaded, pin the patch to one overload — by parameter types (readable)
 or by raw JVM descriptor:
@@ -195,9 +244,19 @@ public static String greet(Greeter self, String name) {
 }
 ```
 
-Static members use `ShimFields.getStatic` / `setStatic` and `ShimMethods.invokeStatic`.
-When overloads cannot be inferred from runtime values (especially `null`), use
-`ShimMethods.invokeExact` / `invokeStaticExact` with an explicit `Class<?>[]` signature.
+Static members use `ShimFields.getStatic` / `setStatic` and `ShimMethods.invokeStatic`, and
+`ShimMethods.newInstance` reaches a private constructor. Overload resolution follows Java's own
+rules closely: widening primitive conversion applies, the most specific overload wins, varargs
+are supported, and compiler-generated bridge methods are ignored so a covariant override or a
+generic interface implementation resolves cleanly. When overloads still cannot be inferred from
+runtime values (especially `null`), use `ShimMethods.invokeExact` / `invokeStaticExact` with an
+explicit `Class<?>[]` signature.
+
+Both helpers search superclasses and then interfaces, so inherited members and interface
+constants are reachable. Lookups start from the runtime class of the instance, so a subclass
+field that shadows one on the target wins — `ShimFields.getDeclared` / `setDeclared` name the
+declaring class explicitly when that matters. Whatever the target throws propagates unchanged,
+including checked exceptions.
 
 **Final fields** — reading is unrestricted, but writing a `final` field via reflection is
 fragile (forbidden for `static final` and records, and the JDK is progressively restricting
@@ -267,7 +326,15 @@ access before the transform; use `ShimFields`/`ShimMethods`, which then need no
   dev mode ("Applied shims"), alongside a "Retired shims" table for those held back by a version
   pin.
 - `quarkus.shim.dump-transformed-classes=true` writes a readable bytecode dump of each
-  transformed class to `target/shim/<class>.txt`.
+  transformed class to the module's build output under `shim/<class>.txt`. The dump is written
+  even when the weave fails validation, which is when you most want it.
+- `quarkus.shim.verify-transformed-classes=true` runs each woven class through ASM's
+  `CheckClassAdapter`, turning a structural problem into a build failure instead of a
+  `ClassFormatError` or `VerifyError` at class-load time. Worth enabling while developing a shim
+  against an unusual target.
+- A `@Shim` whose target is in no application archive fails the build rather than being reported
+  as applied: a class Quarkus cannot locate is a class it cannot transform, and that is almost
+  always a typo in `targetName` or a dependency without a Jandex index.
 - `quarkus.shim.enabled=false` disables all shim processing. Each shim has a `name` (default:
   its simple class name); disable one with `quarkus.shim.instances."<name>".enabled=false`.
 
@@ -276,7 +343,7 @@ access before the transform; use `ShimFields`/`ShimMethods`, which then need no
 Constructors and static initializers are addressed by their JVM names:
 
 ```java
-@Shim(Widget.class)
+@Shim(value = Widget.class, definalize = { "DEFAULTS" })
 public class WidgetShim {
 
     @ShimBefore(method = "<init>")            // runs at entry, before super();
@@ -287,8 +354,14 @@ public class WidgetShim {
         ShimFields.set(self, "size", 99);     // fix up state the constructor got wrong
     }
 
+    // Widget must actually have a static initializer for this to apply — a class
+    // with no static field initializers and no static block has no <clinit>.
     @ShimReplace(method = "<clinit>")         // replace the static initializer entirely
-    public static void staticInit() { }
+    public static void staticInit() {
+        // the original <clinit> is gone, so every static field it set is now unset;
+        // 'DEFAULTS' is listed in definalize above so it can be written here
+        ShimFields.setStatic(Widget.class, "DEFAULTS", Map.of("mode", "patched"));
+    }
 }
 ```
 
@@ -299,8 +372,9 @@ Rules, all enforced at build time:
   Use `@ShimAfter` + `ShimFields` instead.
 - A constructor *before*-hook cannot receive `self` (uninitialized); an *after*-hook can.
 - Replacing `<clinit>` discards static field initializers written at the declaration site too —
-  they are part of `<clinit>` in bytecode. Set them from the hook (e.g. `ShimFields.setStatic`)
-  if needed.
+  they are part of `<clinit>` in bytecode. Set them from the hook with `ShimFields.setStatic`,
+  and list any `static final` field you assign in `definalize` — otherwise the write is rejected
+  and the class fails initialization permanently with `NoClassDefFoundError`.
 - With constructor chaining (`this(...)`), a hook woven into every overload fires once per
   constructor body entered; pin one overload with `descriptor()` if that matters.
 
@@ -308,14 +382,21 @@ Rules, all enforced at build time:
 
 - Patching happens during Quarkus augmentation; only classes loaded through the Quarkus
   ClassLoader can be patched (application classes and indexed dependencies — not JDK classes).
-- `@ShimBefore` / `@ShimAfter` hooks are `static void` with no parameters or a single `self`
-  parameter. `@ShimAfter` runs before every *normal* return; it does not run when the method
-  exits by throwing.
+- `@ShimBefore` / `@ShimAfter` / `@ShimCatch` / `@ShimFinally` hooks are `static void`. Their
+  parameters are optional and positional — see each annotation for the exact list. A hook
+  parameter that could equally be read as `self` or as an argument/returned value (typically a
+  lone `Object`) is rejected at build time rather than silently bound to one of them.
+- `@ShimAfter` runs before every *normal* return; it does not run when the method exits by
+  throwing. `@ShimCatch` runs only on the throwing path, `@ShimFinally` on both.
 - `@ShimReplace` discards the original body entirely and delegates to your static hook.
-  It cannot be combined with `@ShimBefore`/`@ShimAfter` on the same target method.
-- Abstract and native methods cannot be shimmed.
-- `ShimFields`/`ShimMethods` find members declared in superclasses of the target, but only the
-  target class itself is registered for native-image reflection.
+  It cannot be combined with any other hook on the same target method, and neither can
+  `@ShimAround`.
+- Abstract and native methods cannot be shimmed. Compiler-generated bridge methods are skipped,
+  so a hook on a covariant override or a generic interface implementation fires once per call
+  however the caller reached it.
+- `ShimFields`/`ShimMethods` find members declared in superclasses and interfaces of the target.
+  The target and its indexed superclasses are registered for native-image reflection; a
+  superclass outside the Jandex index is not, so index the dependency if you reach into it.
 - The same-package trick assumes classpath (unnamed module) deployment — standard for Quarkus
   apps. Sealed or signed JARs can reject same-package classes from other JARs (rare).
 - Invalid shims (non-static hooks, signature mismatches, unknown target methods, `self` on a

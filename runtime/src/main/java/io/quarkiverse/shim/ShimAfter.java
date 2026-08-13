@@ -7,7 +7,8 @@ import java.lang.annotation.Target;
 
 /**
  * Runs this hook just before every normal return of the target method.
- * It does not run when the target method exits by throwing.
+ * It does not run when the target method exits by throwing — use
+ * {@link ShimCatch} for that, or {@link ShimFinally} to run on both paths.
  * <p>
  * The annotated method must be {@code static void}. Its parameters, in order,
  * are:

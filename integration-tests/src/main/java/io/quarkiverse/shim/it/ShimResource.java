@@ -69,6 +69,25 @@ public class ShimResource {
     }
 
     @GET
+    @Path("/upload/{name}")
+    public String upload(@PathParam("name") String name) {
+        Uploader uploader = new Uploader();
+        String outcome;
+        try {
+            outcome = uploader.upload(name, 1);
+        } catch (Exception e) {
+            outcome = "threw:" + e.getMessage();
+        }
+        return outcome + "|" + String.join(",", uploader.log());
+    }
+
+    @GET
+    @Path("/retry/{label}")
+    public String retry(@PathParam("label") String label) {
+        return new Retryable().describe(label, 1);
+    }
+
+    @GET
     @Path("/decision/{value}")
     public String decision(@PathParam("value") String value) {
         DecisionEngine engine = new DecisionEngine();

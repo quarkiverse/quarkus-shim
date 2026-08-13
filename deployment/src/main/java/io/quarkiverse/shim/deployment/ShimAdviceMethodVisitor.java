@@ -24,6 +24,8 @@ final class ShimAdviceMethodVisitor extends LocalVariablesSorter {
     private final int[] paramSlots;
     private final Type[] paramTypes;
     private final Type returnType;
+    /** Lazily allocated slot holding the value about to be returned; -1 until needed. */
+    private int returnLocal = -1;
 
     ShimAdviceMethodVisitor(int access, String descriptor, MethodVisitor delegate,
             List<AdviceBinding> before, List<AdviceBinding> after) {
@@ -72,7 +74,12 @@ final class ShimAdviceMethodVisitor extends LocalVariablesSorter {
             anyReturned |= b.returned;
         }
         if (anyReturned && opcode != Opcodes.RETURN) {
-            int retLocal = newLocal(returnType);
+            // one slot for the whole method: allocating per return site burned
+            // locals proportionally to the number of returns
+            if (returnLocal < 0) {
+                returnLocal = newLocal(returnType);
+            }
+            int retLocal = returnLocal;
             super.visitVarInsn(returnType.getOpcode(Opcodes.ISTORE), retLocal);
             for (AdviceBinding b : after) {
                 if (b.self) {
@@ -97,7 +104,7 @@ final class ShimAdviceMethodVisitor extends LocalVariablesSorter {
 
     private void invokeHook(AdviceBinding b) {
         super.visitMethodInsn(Opcodes.INVOKESTATIC, b.op.shimOwnerInternalName, b.op.shimMethodName,
-                b.op.shimMethodDescriptor, false);
+                b.op.shimMethodDescriptor, b.op.shimOwnerIsInterface);
     }
 
     private void boxReturnedValueIfNeeded(AdviceBinding binding) {
