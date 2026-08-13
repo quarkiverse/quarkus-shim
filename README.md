@@ -130,6 +130,56 @@ annotations after augmentation. Quarkus build steps that only read the immutable
 do not; `@ShimAnnotate` is therefore not a way to add build-time annotations such as CDI scopes
 or REST endpoints.
 
+## Pinning a shim to a dependency version
+
+A patch for someone else's bug is a bandaid: it is written against the exact release that has
+the bug, and it should come off when that release is upgraded. Declare the versions the patch
+belongs to and Shim stops applying it once the dependency moves past them:
+
+```java
+@Shim(value = DecisionEngine.class,
+      name = "fail-closed-decision",
+      dependency = "com.acme:decision-engine",   // groupId:artifactId of the library
+      versions = "[1.2,1.5)")                    // the releases this patch was written for
+public class DecisionEngineShim {
+
+    @ShimReplace(method = "isAllowed", paramTypes = String.class)
+    public static boolean isAllowed(String decision) {
+        return "ALLOW".equalsIgnoreCase(decision);
+    }
+}
+```
+
+Upgrade `com.acme:decision-engine` to 1.5 and the target class is left untouched — the vendor's
+own code runs, and the build warns that the shim did not apply so it can be deleted:
+
+```
+WARN  Shim 'fail-closed-decision' (com.acme.DecisionEngineShim) was not applied to
+      com.acme.DecisionEngine: com.acme:decision-engine is at 1.5.0, outside the pinned
+      range '[1.2,1.5)'
+```
+
+The warning repeats once at startup, and dev mode lists retired shims in a "Retired shims" Dev
+UI table next to the applied ones.
+
+`versions` takes standard Maven range syntax — `[1.2,1.5)` (1.2 up to but excluding 1.5),
+`(,2.0)`, `[2.0,)`, `[1.2,1.3],[1.5,1.6]`, or a bare `1.4.2` meaning *exactly* that version —
+matched against the version the build actually resolved. Comparison is Maven's, so `1.10` is
+above `1.9` and `1.5-SNAPSHOT` sits just below `1.5`.
+
+Leave `dependency` out and the artifact containing the target class is used, which is usually
+what you want. Name it explicitly when the target class is not in the artifact whose version
+should decide, or when it lives in a dependency without a Jandex index. Used on its own,
+`dependency` is a presence gate: the shim applies only while that artifact is on the classpath.
+
+By default a shim that no longer applies is retired with a warning. For a patch that must not
+disappear without someone looking at it, make the mismatch stop the build instead:
+
+```java
+@Shim(value = DecisionEngine.class, dependency = "com.acme:decision-engine",
+      versions = "[1.2,1.5)", onVersionMismatch = VersionMismatch.FAIL)
+```
+
 ## Reaching private and package-private members
 
 **Private fields and methods** — the JVM enforces private access even at the bytecode level,
@@ -213,8 +263,9 @@ access before the transform; use `ShimFields`/`ShimMethods`, which then need no
 
 ## Diagnostics and gating
 
-- Applied patches are logged at build time and once at startup; a **Dev UI** card ("Applied
-  shims") lists them in dev mode.
+- Applied patches are logged at build time and once at startup; a **Dev UI** card lists them in
+  dev mode ("Applied shims"), alongside a "Retired shims" table for those held back by a version
+  pin.
 - `quarkus.shim.dump-transformed-classes=true` writes a readable bytecode dump of each
   transformed class to `target/shim/<class>.txt`.
 - `quarkus.shim.enabled=false` disables all shim processing. Each shim has a `name` (default:
@@ -273,8 +324,8 @@ Rules, all enforced at build time:
 ## Modules
 
 - `runtime` (`io.quarkiverse.shim:quarkus-shim`) — the annotation API (`@Shim`, `@ShimBefore`,
-  `@ShimAfter`, `@ShimReplace`, `@ShimAround`, `@ShimAnnotate`, `AnnotationConflict`) and the
-  `ShimFields` / `ShimMethods` access helpers.
+  `@ShimAfter`, `@ShimReplace`, `@ShimAround`, `@ShimAnnotate`, `AnnotationConflict`,
+  `VersionMismatch`) and the `ShimFields` / `ShimMethods` access helpers.
 - `deployment` (`io.quarkiverse.shim:quarkus-shim-deployment`) — Jandex scanning, validation,
   native-image reflection registration, and the ASM class transformer, plus
   `QuarkusExtensionTest`-based tests.

@@ -301,6 +301,102 @@ Rules, all enforced at build time:
 * With constructor chaining (`this(...)`), a hook woven into every overload fires once per
   constructor body entered; pin one overload with `descriptor()` if that matters.
 
+== Pinning a shim to a dependency version
+
+A patch for someone else's bug is a bandaid: it is written against the exact release that has
+the bug, and it should come off when that release is upgraded. Declare the versions the patch
+belongs to and Shim stops applying it once the dependency moves past them:
+
+[source,java]
+----
+@Shim(value = DecisionEngine.class,
+      name = "fail-closed-decision",
+      dependency = "com.acme:decision-engine",   // <1>
+      versions = "[1.2,1.5)")                    // <2>
+public class DecisionEngineShim {
+
+    @ShimReplace(method = "isAllowed", paramTypes = String.class)
+    public static boolean isAllowed(String decision) {
+        return "ALLOW".equalsIgnoreCase(decision);
+    }
+}
+----
+<1> `groupId:artifactId` of the library being patched.
+<2> The releases this patch was written for: 1.2 up to but excluding 1.5.
+
+Upgrade `com.acme:decision-engine` to 1.5 and the target class is left untouched — the vendor's
+own code runs, and the build warns that the shim did not apply so it can be deleted:
+
+[source]
+----
+WARN  Shim 'fail-closed-decision' (com.acme.DecisionEngineShim) was not applied to
+      com.acme.DecisionEngine: com.acme:decision-engine is at 1.5.0, outside the pinned
+      range '[1.2,1.5)'
+----
+
+The same warning is repeated once at startup, and dev mode lists retired shims in a "Retired
+shims" Dev UI table next to the applied ones.
+
+This matters because a shim is written against bytecode the vendor is free to change. Without a
+pin, an upgrade either silently reverts your fix (the patched method was renamed, so the hook no
+longer matches and the build fails) or — worse — keeps weaving a stale patch over a method whose
+meaning has moved on. Pinning makes the upgrade the thing that retires the patch.
+
+=== Version ranges
+
+`versions` takes standard Maven range syntax, matched against the version the build actually
+resolved (after dependency management and conflict resolution):
+
+[cols="1,3"]
+|===
+| `[1.2,1.5)`         | 1.2 or above, below 1.5
+| `(,2.0)`            | anything below 2.0
+| `[2.0,)`            | 2.0 and up
+| `[1.4.2]` or `1.4.2`| exactly that version
+| `[1.2,1.3],[1.5,1.6]`| either range
+|===
+
+Versions compare the Maven way, so `1.10` is above `1.9` and `1.5-SNAPSHOT` sits just below
+`1.5`. Note that a bare `1.4.2` means _exactly_ that version here, unlike a Maven dependency
+declaration where it is only a preference.
+
+Leave `dependency` out and the artifact containing the target class is used, which is usually
+what you want:
+
+[source,java]
+----
+@Shim(value = DecisionEngine.class, versions = "[1.2,1.5)")
+----
+
+Name it explicitly when the target class is not in the artifact whose version should decide, or
+when it lives in a dependency without a Jandex index (auto-detection fails the build with that
+advice rather than guessing).
+
+Used on its own, `dependency` becomes a presence gate — the shim applies only while that
+artifact is on the classpath:
+
+[source,java]
+----
+@Shim(value = DecisionEngine.class, dependency = "com.acme:decision-engine")
+----
+
+=== Failing the build instead
+
+By default a shim that no longer applies is retired with a warning. For a patch that must not
+disappear without someone looking at it — a security fix, say — make the mismatch stop the
+build:
+
+[source,java]
+----
+@Shim(value = DecisionEngine.class,
+      dependency = "com.acme:decision-engine",
+      versions = "[1.2,1.5)",
+      onVersionMismatch = VersionMismatch.FAIL)
+----
+
+The upgrade then fails augmentation until someone re-pins the range (having checked the patch
+still makes sense), rewrites the patch, or deletes it because the vendor fixed the bug.
+
 == Diagnostics
 
 Shim logs every applied patch at build time and again, once, at application startup:
@@ -312,7 +408,8 @@ Shim applied 3 patch(es):
   ...
 ----
 
-In dev mode a *Dev UI* card ("Applied shims") lists the same information in a table.
+In dev mode a *Dev UI* card lists the same information in an "Applied shims" table, with a
+"Retired shims" table beside it for shims held back by a version pin.
 
 Set `quarkus.shim.dump-transformed-classes=true` to write a human-readable bytecode dump of
 each transformed target to `target/shim/<class>.txt` — useful for seeing exactly what was

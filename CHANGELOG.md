@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Version pinning for shims: `@Shim(dependency = "groupId:artifactId", versions = "[1.2,1.5)")`
+  applies a patch only while the resolved dependency version falls inside the Maven range, so
+  upgrading past the patched releases retires the shim instead of weaving a stale patch. The
+  dependency defaults to the artifact containing the target class; used without `versions` it is
+  a presence gate.
+- `VersionMismatch` policy for pinned shims: `SKIP` (default) retires the shim with a warning at
+  build time, at startup, and in a "Retired shims" Dev UI table; `FAIL` stops augmentation so the
+  patch must be reviewed before the dependency moves.
+
 ## 0.2.0 - 2026-07-19
 
 ### Added

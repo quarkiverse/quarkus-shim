@@ -75,6 +75,24 @@ public class ShimResourceTest {
     }
 
     @Test
+    public void testVersionPinnedShimApplies() {
+        // DecisionEngineShim is pinned to a range quarkus-core satisfies, so
+        // isAllowed is fail-closed; RetiredDecisionEngineShim is pinned to a
+        // range it does not, so legacyFlag keeps the vendor's body
+        given()
+                .when().get("/shim/decision/TIMEOUT")
+                .then()
+                .statusCode(200)
+                .body(is("false|vendor"));
+
+        given()
+                .when().get("/shim/decision/allow")
+                .then()
+                .statusCode(200)
+                .body(is("true|vendor"));
+    }
+
+    @Test
     public void testOverloadPinningAndDisabledShim() {
         // format(int) is replaced (pinned via paramTypes); format(String) is
         // targeted only by DisabledFormatterShim, which application.properties
