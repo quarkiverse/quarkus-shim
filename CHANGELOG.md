@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-13
+
 ### Added
 
 - Version pinning for shims: `@Shim(dependency = "groupId:artifactId", versions = "[1.2,1.5)")`
