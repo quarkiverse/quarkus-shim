@@ -29,6 +29,21 @@ import java.lang.annotation.Target;
  * bodies (application and dependency classes share the Quarkus ClassLoader, so
  * they end up in the same runtime package). Combine with {@link #widenAccess()}
  * to also reach {@code private} members directly.
+ * <p>
+ * <strong>Dev mode caveat.</strong> That trick relies on the shim and target
+ * sharing a runtime package, which holds in JVM mode, in native image, and for
+ * application-to-application shims in dev mode — but dev mode loads application
+ * and dependency classes with different classloaders, so a shim reaching a
+ * <em>dependency's</em> package-private or {@code protected} member directly can
+ * throw {@link IllegalAccessError} in dev mode only. For private access to a
+ * dependency, prefer {@code ShimFields}/{@code ShimMethods} or
+ * {@link #widenAccess()}, which do not depend on runtime-package identity.
+ * <p>
+ * When several {@code @Shim} classes target the same class their patches are
+ * merged: {@link #definalize()} entries are unioned and {@link #widenAccess()}
+ * applies to the whole class if any of them sets it. Note also that a
+ * {@code @Shim} in any Jandex-indexed dependency is picked up, not only ones
+ * declared by the application.
  */
 @Target(ElementType.TYPE)
 @Retention(RetentionPolicy.CLASS)

@@ -32,9 +32,18 @@ import java.lang.annotation.Target;
  * }</pre>
  *
  * {@code @ShimAround} cannot be combined with other hooks on the same target
- * method, and cannot target constructors. Note that {@code proceed()} always
- * runs the original with the arguments the target was called with; passing
- * different arguments is not supported in this version.
+ * method, and cannot target constructors, static initializers, or abstract and
+ * native methods. {@code proceed()} runs the original with the arguments the
+ * target was called with; {@link ShimCall#proceed(Object...)} runs it with
+ * replacements instead.
+ * <p>
+ * Because the hook wraps the original, it may also catch what the original
+ * throws — including checked exceptions, which reach the hook even though
+ * {@link ShimCall#proceed()} does not declare them. Catch {@code Throwable} (or
+ * the specific type) rather than relying on the compiler to let you name it.
+ * <p>
+ * The wrapper keeps the target's {@code synchronized} modifier, so on a
+ * synchronized target the hook body runs while holding the monitor.
  */
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.CLASS)

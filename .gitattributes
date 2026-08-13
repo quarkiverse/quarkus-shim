@@ -1,0 +1,10 @@
+# Normalise line endings so the formatter's validate goal behaves the same on
+# every platform. Without this, a Windows clone with core.autocrlf=true fails
+# `mvn install -Dno-format` on the first file it reads.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.jar binary

@@ -97,7 +97,7 @@ final class ShimAdviceMethodVisitor extends LocalVariablesSorter {
 
     private void invokeHook(AdviceBinding b) {
         super.visitMethodInsn(Opcodes.INVOKESTATIC, b.op.shimOwnerInternalName, b.op.shimMethodName,
-                b.op.shimMethodDescriptor, false);
+                b.op.shimMethodDescriptor, b.op.shimOwnerIsInterface);
     }
 
     private void boxReturnedValueIfNeeded(AdviceBinding binding) {

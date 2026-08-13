@@ -52,6 +52,11 @@ final class ShimAnnotationPatch {
         return kind == Kind.FIELD && targetName.equals(fieldName);
     }
 
+    /** Whether this patch names one exact overload, rather than every overload of the name. */
+    boolean pinsExactDescriptor() {
+        return !targetMethodDescriptor.isEmpty();
+    }
+
     String describe(String targetClass) {
         String target = kind == Kind.CLASS ? targetClass : targetClass + "#" + targetName;
         return target + " [annotate-" + kind.name().toLowerCase() + "] <- " + sourceRef;

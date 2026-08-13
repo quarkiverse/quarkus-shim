@@ -103,4 +103,18 @@ public class ShimResourceTest {
                 .statusCode(200)
                 .body(is("patched-int:7|str:x"));
     }
+
+    @Test
+    void catchAndFinallyHooksRunOnTheRightPaths() {
+        given().when().get("/shim/upload/report.csv").then().statusCode(200)
+                .body(is("report.csv/1|finally"));
+
+        given().when().get("/shim/upload/boom").then().statusCode(200)
+                .body(is("threw:upload failed|catch:upload failed,finally"));
+    }
+
+    @Test
+    void proceedSubstitutesArguments() {
+        given().when().get("/shim/retry/db").then().statusCode(200).body(is("db:1|DB:3"));
+    }
 }

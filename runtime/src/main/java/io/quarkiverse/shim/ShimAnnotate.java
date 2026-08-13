@@ -20,9 +20,19 @@ import java.lang.annotation.Target;
  * the same annotation type, {@link #onConflict()} controls whether it is
  * replaced, retained, or treated as an augmentation error.
  * <p>
- * The annotations are attached by bytecode transformation. Consequently they
- * are available to reflection and ordinary JVM consumers after augmentation,
- * but processors that only inspect the immutable Jandex index cannot see them.
+ * The annotations are attached by bytecode transformation, and their retention
+ * is preserved. A {@code RUNTIME} annotation is therefore visible to reflection
+ * on the patched class; a {@code CLASS} annotation is written to the class file
+ * but, as always, is not visible to reflection. {@code SOURCE} annotations never
+ * reach the class file at all and so cannot be copied.
+ * <p>
+ * Either way the annotation is attached after the Jandex index was built, so
+ * build steps that read only the index — CDI scopes, REST endpoints, and most
+ * Quarkus extensions — will not see it.
+ * <p>
+ * An unqualified {@link #target()} matches every method of that name. Compiler
+ * generated bridge methods are skipped, so a covariant override is annotated
+ * once; pin an overload with {@link #paramTypes()} when a class has several.
  */
 @Target({ ElementType.TYPE, ElementType.METHOD, ElementType.FIELD })
 @Retention(RetentionPolicy.CLASS)

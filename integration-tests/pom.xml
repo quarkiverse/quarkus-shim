@@ -11,7 +11,9 @@
     <name>Quarkus Shim - Integration Tests</name>
 
     <properties>
-        <skipITs>true</skipITs>
+        <!-- the JVM-packaged integration tests run by default; the native
+             profile below re-runs them against the native image -->
+        <skipITs>false</skipITs>
     </properties>
 
     <dependencies>

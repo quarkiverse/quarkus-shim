@@ -26,14 +26,15 @@ public class ShimRecorder {
     }
 
     /**
-     * Reports shims that were pinned to a dependency version and did not apply,
-     * so an obsolete patch does not go unnoticed after an upgrade.
+     * Reports shims held back by their dependency gate — either the dependency
+     * is absent, or its version falls outside {@code versions()} — so an
+     * obsolete patch does not go unnoticed after an upgrade.
      */
     public void logRetired(List<String> descriptions) {
         if (descriptions.isEmpty()) {
             return;
         }
-        LOG.warnf("Shim did not apply %d pinned patch(es); they can be removed once verified:", descriptions.size());
+        LOG.warnf("Shim did not apply %d gated patch(es); they can be removed once verified:", descriptions.size());
         for (String description : descriptions) {
             LOG.warnf("  - %s", description);
         }

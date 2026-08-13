@@ -33,6 +33,27 @@ public interface ShimBuildTimeConfig {
     boolean dumpTransformedClasses();
 
     /**
+     * Whether every transformed target class is checked with ASM's
+     * {@code CheckClassAdapter} during the build.
+     * <p>
+     * Structural problems in the woven bytecode normally surface as a
+     * {@code ClassFormatError} or {@code VerifyError} when the class is first
+     * loaded, which can be long after the build. Enabling this turns them into
+     * a build failure at the point the class is woven, at some cost to build
+     * time — useful when developing a shim against an unusual target.
+     */
+    @WithDefault("false")
+    boolean verifyTransformedClasses();
+
+    /**
+     * Whether a {@code shim-report.txt} summarising the applied and retired
+     * shims is written to the build output directory. Useful for reviewing what
+     * a build patched, or for diffing across builds in CI.
+     */
+    @WithDefault("false")
+    boolean report();
+
+    /**
      * Per-shim overrides, keyed by the shim's {@code name} (see
      * {@code @Shim(name = ...)}, which defaults to the shim class's simple
      * name). For example {@code quarkus.shim.instances."my-patch".enabled=false}

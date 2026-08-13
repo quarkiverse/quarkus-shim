@@ -12,12 +12,14 @@ no Java agent, no runtime instrumentation.
 NOTE: "Shim" here means _modifying existing behavior_ in classes you cannot edit — not a
 JavaScript-style compatibility polyfill.
 
-The four kinds of hook:
+The six kinds of hook:
 
 [cols="1,3"]
 |===
 | `@ShimBefore` | run code at method entry; may receive `self` and a prefix of the arguments
 | `@ShimAfter`  | run code before every normal return; may receive `self` and the returned value
+| `@ShimCatch`  | run code when the method exits by throwing; may receive `self` and the exception
+| `@ShimFinally`| run code however the method exits; may receive `self`
 | `@ShimReplace`| replace the method body entirely
 | `@ShimAround` | wrap the method — call the original via `ShimCall`, transforming args/result
 |===
@@ -296,8 +298,13 @@ Rules, all enforced at build time:
   Use `@ShimAfter` + `ShimFields` (and `definalize` for final fields) instead.
 * A constructor _before_-hook cannot receive `self` (uninitialized); an _after_-hook can.
 * Replacing `<clinit>` discards static field initializers written at the declaration site
-  too — they are part of `<clinit>` in bytecode. Set them from the hook
-  (e.g. `ShimFields.setStatic`) if needed.
+  too — they are part of `<clinit>` in bytecode. Set them from the hook with
+  `ShimFields.setStatic`, and list any `static final` field you assign in `definalize` —
+  otherwise the write is rejected and the class fails initialization permanently with
+  `NoClassDefFoundError`.
+* `@ShimReplace(method = "<clinit>")` only applies to a class that actually has a static
+  initializer; a class with no static field initializers and no static block has no
+  `<clinit>`, and the build says so.
 * With constructor chaining (`this(...)`), a hook woven into every overload fires once per
   constructor body entered; pin one overload with `descriptor()` if that matters.
 
@@ -412,8 +419,17 @@ In dev mode a *Dev UI* card lists the same information in an "Applied shims" tab
 "Retired shims" table beside it for shims held back by a version pin.
 
 Set `quarkus.shim.dump-transformed-classes=true` to write a human-readable bytecode dump of
-each transformed target to `target/shim/<class>.txt` — useful for seeing exactly what was
-woven in.
+each transformed target to `shim/<class>.txt` under the module's build output directory —
+useful for seeing exactly what was woven in. The dump is written even when the weave fails
+validation, which is when it is most useful.
+
+Set `quarkus.shim.verify-transformed-classes=true` to run each woven class through ASM's
+`CheckClassAdapter`. Structural problems then fail the build at the point the class is woven,
+instead of surfacing as a `ClassFormatError` or `VerifyError` when the class is first loaded.
+
+A `@Shim` whose target is in no application archive fails the build rather than being
+reported as applied — a class Quarkus cannot locate is one it cannot transform, which is
+almost always a typo in `targetName` or a dependency without a Jandex index.
 
 == Enabling and disabling shims
 
@@ -436,14 +452,22 @@ include::includes/quarkus-shim.adoc[leveloffset=+1, opts=optional]
 * Patching happens during Quarkus augmentation; only classes loaded through the Quarkus
   ClassLoader can be patched (application classes and indexed dependencies — not JDK
   classes).
-* `@ShimBefore` / `@ShimAfter` hooks are `static void` with no parameters or a single `self`
-  parameter. `@ShimAfter` runs before every _normal_ return; it does not run when the method
-  exits by throwing.
+* `@ShimBefore` / `@ShimAfter` / `@ShimCatch` / `@ShimFinally` hooks are `static void`.
+  Their parameters are optional and positional — see each annotation for the exact list. A
+  parameter that reads equally well as `self` or as an argument/returned value (typically a
+  lone `Object`) is rejected at build time rather than silently bound to one of them.
+* `@ShimAfter` runs before every _normal_ return; it does not run when the method exits by
+  throwing. `@ShimCatch` runs only on the throwing path, `@ShimFinally` on both. Neither can
+  target a constructor.
 * `@ShimReplace` discards the original body entirely and delegates to your static hook. It
-  cannot be combined with `@ShimBefore`/`@ShimAfter` on the same target method.
-* Abstract and native methods cannot be shimmed.
-* `ShimFields`/`ShimMethods` find members declared in superclasses of the target, but only
-  the target class itself is registered for native-image reflection.
+  cannot be combined with any other hook on the same target method, and neither can
+  `@ShimAround`.
+* Abstract and native methods cannot be shimmed. Compiler-generated bridge methods are
+  skipped, so a hook on a covariant override or a generic interface implementation fires
+  once per call however the caller reached it.
+* `ShimFields`/`ShimMethods` find members declared in superclasses and interfaces of the
+  target. The target and its indexed superclasses are registered for native-image
+  reflection; a superclass outside the Jandex index is not.
 * The same-package trick assumes classpath (unnamed module) deployment — standard for
   Quarkus apps. Sealed or signed JARs can reject same-package classes from other JARs
   (rare).
