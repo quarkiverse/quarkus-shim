@@ -3,6 +3,7 @@ package io.quarkiverse.shim.devmode;
 import static io.restassured.RestAssured.when;
 import static org.hamcrest.Matchers.is;
 
+import org.jboss.shrinkwrap.api.asset.StringAsset;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
@@ -16,7 +17,12 @@ public class DevModeTest {
 
     @RegisterExtension
     static final QuarkusDevModeTest TEST = new QuarkusDevModeTest()
-            .withApplicationRoot(jar -> jar.addClasses(DevGreeter.class, DevGreeterShim.class, DevGreetResource.class));
+            .withApplicationRoot(jar -> jar
+                    .addClasses(DevGreeter.class, DevGreeterShim.class, DevGreetResource.class)
+                    // dev mode defaults to 8080, which is often taken on a developer
+                    // machine; bind an ephemeral port and let the harness read the
+                    // real one back out of the startup log
+                    .add(new StringAsset("quarkus.http.port=0\n"), "application.properties"));
 
     @Test
     void shimAppliesInDevModeAndSurvivesLiveReload() {

@@ -25,15 +25,18 @@ import org.objectweb.asm.util.TraceClassVisitor;
 
 import io.quarkiverse.shim.AnnotationConflict;
 import io.quarkiverse.shim.ShimRecorder;
+import io.quarkiverse.shim.VersionMismatch;
 import io.quarkus.deployment.IsDevelopment;
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
 import io.quarkus.deployment.annotations.ExecutionTime;
 import io.quarkus.deployment.annotations.Record;
+import io.quarkus.deployment.builditem.ApplicationArchivesBuildItem;
 import io.quarkus.deployment.builditem.BytecodeTransformerBuildItem;
 import io.quarkus.deployment.builditem.CombinedIndexBuildItem;
 import io.quarkus.deployment.builditem.FeatureBuildItem;
 import io.quarkus.deployment.builditem.nativeimage.ReflectiveClassBuildItem;
+import io.quarkus.deployment.pkg.builditem.CurateOutcomeBuildItem;
 import io.quarkus.devui.spi.page.CardPageBuildItem;
 import io.quarkus.devui.spi.page.Page;
 
@@ -65,16 +68,20 @@ public class ShimProcessor {
     @BuildStep
     void applyShims(ShimBuildTimeConfig config,
             CombinedIndexBuildItem combinedIndex,
+            CurateOutcomeBuildItem curateOutcome,
+            ApplicationArchivesBuildItem archives,
             BuildProducer<BytecodeTransformerBuildItem> transformers,
             BuildProducer<ReflectiveClassBuildItem> reflectiveClasses,
             BuildProducer<AppliedShimsBuildItem> applied) {
         if (!config.enabled()) {
             LOG.info("Shim processing is disabled (quarkus.shim.enabled=false); @Shim declarations are ignored");
-            applied.produce(new AppliedShimsBuildItem(List.of()));
+            applied.produce(new AppliedShimsBuildItem(List.of(), List.of()));
             return;
         }
         IndexView index = combinedIndex.getIndex();
         Map<String, ClassPlan> plans = new LinkedHashMap<>();
+        ShimVersionGate gate = new ShimVersionGate(curateOutcome, archives);
+        List<Map<String, String>> retiredRows = new ArrayList<>();
 
         for (AnnotationInstance shimAnnotation : index.getAnnotations(SHIM)) {
             ClassInfo shimClass = shimAnnotation.target().asClass();
@@ -84,6 +91,22 @@ public class ShimProcessor {
                 continue;
             }
             String targetClass = resolveTargetClass(shimAnnotation, shimClass);
+
+            ShimVersionGate.Decision decision = gate.evaluate(shimClass.name().toString(), targetClass,
+                    stringValue(shimAnnotation, "dependency"), stringValue(shimAnnotation, "versions"));
+            if (!decision.applies()) {
+                if (versionMismatchPolicy(shimAnnotation) == VersionMismatch.FAIL) {
+                    throw new IllegalStateException("Shim '" + shimName + "' (" + shimClass.name()
+                            + ") does not apply: " + decision.reason()
+                            + ". Update the patch for the new version, re-pin it, or remove it"
+                            + " (onVersionMismatch = VersionMismatch.SKIP retires it with a warning instead)");
+                }
+                LOG.warnf("Shim '%s' (%s) was not applied to %s: %s", shimName, shimClass.name(), targetClass,
+                        decision.reason());
+                retiredRows.add(row(shimName, targetClass, decision));
+                continue;
+            }
+
             ClassPlan plan = plans.computeIfAbsent(targetClass, k -> new ClassPlan());
 
             AnnotationValue definalizeValue = shimAnnotation.value("definalize");
@@ -150,13 +173,14 @@ public class ShimProcessor {
                 LOG.infof("Shim: %s", patch.describe(targetClass));
             }
         }
-        applied.produce(new AppliedShimsBuildItem(rows));
+        applied.produce(new AppliedShimsBuildItem(rows, retiredRows));
     }
 
     @BuildStep
     @Record(ExecutionTime.RUNTIME_INIT)
     void logAppliedAtStartup(ShimRecorder recorder, AppliedShimsBuildItem applied) {
         recorder.logApplied(applied.getDescriptions());
+        recorder.logRetired(applied.getRetiredDescriptions());
     }
 
     @BuildStep(onlyIf = IsDevelopment.class)
@@ -170,6 +194,15 @@ public class ShimProcessor {
                 .showColumn("kind")
                 .showColumn("hook")
                 .buildTimeDataKey("shims"));
+        card.addBuildTimeData("retiredShims", applied.getRetiredRows());
+        card.addPage(Page.tableDataPageBuilder("Retired shims")
+                .icon("font-awesome-solid:calendar-xmark")
+                .showColumn("shim")
+                .showColumn("target")
+                .showColumn("dependency")
+                .showColumn("version")
+                .showColumn("reason")
+                .buildTimeDataKey("retiredShims"));
         cards.produce(card);
     }
 
@@ -193,6 +226,21 @@ public class ShimProcessor {
         row.put("hook", patch.sourceRef);
         row.put("shim", patch.shimName);
         return row;
+    }
+
+    private static Map<String, String> row(String shimName, String targetClass, ShimVersionGate.Decision decision) {
+        Map<String, String> row = new LinkedHashMap<>();
+        row.put("shim", shimName);
+        row.put("target", targetClass);
+        row.put("dependency", decision.coordinates());
+        row.put("version", decision.actualVersion());
+        row.put("reason", decision.reason());
+        return row;
+    }
+
+    private static VersionMismatch versionMismatchPolicy(AnnotationInstance annotation) {
+        AnnotationValue value = annotation.value("onVersionMismatch");
+        return value == null ? VersionMismatch.SKIP : VersionMismatch.valueOf(value.asEnum());
     }
 
     private String resolveShimName(AnnotationInstance annotation, ClassInfo shimClass) {

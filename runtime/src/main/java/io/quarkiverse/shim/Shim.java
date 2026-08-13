@@ -18,6 +18,11 @@ import java.lang.annotation.Target;
  * class is not visible from your code, by fully-qualified name
  * ({@link #targetName()}).
  * <p>
+ * A patch for a third-party bug should normally be pinned to the releases it
+ * was written against with {@link #versions()}: once the dependency is upgraded
+ * past them the shim stops being applied instead of silently patching code that
+ * has changed underneath it.
+ * <p>
  * Tip: declaring the shim class in the <em>same package</em> as the target
  * grants it ordinary package-level access — package-private classes and
  * members, and {@code protected} members, become directly usable from hook
@@ -37,11 +42,49 @@ public @interface Shim {
 
     /**
      * Optional logical name for this shim, used to gate it individually via
-     * configuration: {@code quarkus.shim."<name>".enabled=false} disables just
-     * this shim class while leaving the rest active. Defaults to the simple
-     * name of the shim class.
+     * configuration: {@code quarkus.shim.instances."<name>".enabled=false}
+     * disables just this shim class while leaving the rest active. Defaults to
+     * the simple name of the shim class.
      */
     String name() default "";
+
+    /**
+     * Maven coordinate {@code "groupId:artifactId"} of the dependency this shim
+     * patches. Combined with {@link #versions()} it pins the patch to the
+     * releases it was written for.
+     * <p>
+     * When left blank and {@link #versions()} is set, the artifact that
+     * contains the target class is used, which is what you want for the common
+     * case of patching a class in a third-party library.
+     * <p>
+     * Set on its own (without {@link #versions()}) it becomes a presence gate:
+     * the shim applies only while that dependency is on the classpath.
+     */
+    String dependency() default "";
+
+    /**
+     * The versions of {@link #dependency()} this shim applies to, as a Maven
+     * version range — for example {@code "[1.2,1.5)"} (1.2 up to but excluding
+     * 1.5), {@code "(,2.0)"} (anything below 2.0), {@code "[1.4.2]"} or
+     * {@code "1.4.2"} (that version exactly), or a union such as
+     * {@code "[1.2,1.3],[1.5,1.6]"}.
+     * <p>
+     * When the resolved version falls outside the range the target class is
+     * left untouched (see {@link #onVersionMismatch()}), so upgrading the
+     * dependency past the patched releases retires the shim instead of weaving
+     * a stale patch into code that has moved on.
+     * <p>
+     * Note that a bare version means <em>exactly</em> that version here, unlike
+     * a Maven dependency declaration where it is only a preference.
+     */
+    String versions() default "";
+
+    /**
+     * What to do when the dependency is missing or its version falls outside
+     * {@link #versions()}. Defaults to {@link VersionMismatch#SKIP}: the shim
+     * is quietly retired with a warning.
+     */
+    VersionMismatch onVersionMismatch() default VersionMismatch.SKIP;
 
     /**
      * Names of fields on the target class whose {@code final} modifier should

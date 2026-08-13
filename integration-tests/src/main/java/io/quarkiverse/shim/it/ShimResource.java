@@ -67,4 +67,11 @@ public class ShimResource {
     public String format() {
         return Formatter.format(7) + "|" + Formatter.format("x");
     }
+
+    @GET
+    @Path("/decision/{value}")
+    public String decision(@PathParam("value") String value) {
+        DecisionEngine engine = new DecisionEngine();
+        return engine.isAllowed(value) + "|" + engine.legacyFlag();
+    }
 }

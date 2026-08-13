@@ -24,4 +24,18 @@ public class ShimRecorder {
             LOG.infof("  - %s", description);
         }
     }
+
+    /**
+     * Reports shims that were pinned to a dependency version and did not apply,
+     * so an obsolete patch does not go unnoticed after an upgrade.
+     */
+    public void logRetired(List<String> descriptions) {
+        if (descriptions.isEmpty()) {
+            return;
+        }
+        LOG.warnf("Shim did not apply %d pinned patch(es); they can be removed once verified:", descriptions.size());
+        for (String description : descriptions) {
+            LOG.warnf("  - %s", description);
+        }
+    }
 }
