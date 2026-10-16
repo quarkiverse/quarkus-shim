@@ -1,6 +1,7 @@
 package io.quarkiverse.shim.test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 
@@ -14,7 +15,12 @@ public class ShimTest {
 
     @RegisterExtension
     static final QuarkusExtensionTest TEST = new QuarkusExtensionTest()
-            .withApplicationRoot(jar -> jar.addClasses(Greeter.class, GreeterShim.class, CallLog.class));
+            .withApplicationRoot(jar -> jar.addClasses(Greeter.class, GreeterShim.class, CallLog.class))
+            // the applied patches are logged again when the application starts
+            .setLogRecordPredicate(record -> "io.quarkiverse.shim".equals(record.getLoggerName()))
+            .assertLogRecords(records -> assertTrue(
+                    records.stream().anyMatch(record -> record.getMessage().startsWith("Shim applied ")),
+                    "The applied shims are not logged at startup"));
 
     @BeforeEach
     void clearLog() {

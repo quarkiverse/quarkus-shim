@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Quarkus 4: built with Quarkus `999-SNAPSHOT` (Quarkus `main`, until a Quarkus 4.0 release has the
+  services API), and needs Java 21 or later. The applied shims are logged at startup by a service
+  (`ServiceRegistrar`) instead of a bytecode recorder: `io.quarkiverse.shim.ShimRecorder` is
+  replaced by `io.quarkiverse.shim.runtime.ShimStartupLog`.
+
 ## 0.4.0 - 2026-08-14
 
 ### Added
