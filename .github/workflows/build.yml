@@ -57,18 +57,9 @@ jobs:
           java-version: ${{ matrix.java }}
           cache: 'maven'
 
-      # Quarkus 999-SNAPSHOT (main, the future Quarkus 4) : the daily snapshot of quarkusio/quarkus-ecosystem-ci
-      - name: Install the Quarkus snapshot
-        uses: quarkusio/install-quarkus-snapshots-action@main
-
       - name: Build with Maven
-        run: mvn -B -nsu clean install -Dno-format
+        run: mvn -B clean install -Dno-format
 
       - name: Build with Maven (Native)
         if: matrix.java == 21
-        run: mvn -B -nsu install -Dno-format -Dnative -Dquarkus.native.container-build -Dnative.surefire.skip
-
-      # not cached with the Maven repository
-      - name: Remove the Quarkus snapshot
-        if: always()
-        uses: quarkusio/install-quarkus-snapshots-action/cleanup@main
+        run: mvn -B install -Dno-format -Dnative -Dquarkus.native.container-build -Dnative.surefire.skip
