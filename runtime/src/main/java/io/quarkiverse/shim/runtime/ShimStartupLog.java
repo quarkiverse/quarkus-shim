@@ -1,21 +1,20 @@
-package io.quarkiverse.shim;
+package io.quarkiverse.shim.runtime;
 
 import java.util.List;
 
 import org.jboss.logging.Logger;
 
-import io.quarkus.runtime.annotations.Recorder;
-
 /**
- * Runtime recorder that logs the shims applied during the build, once, at
- * application startup.
+ * Logs the shims applied during the build, once, at application startup.
  */
-@Recorder
-public class ShimRecorder {
+public final class ShimStartupLog {
 
     private static final Logger LOG = Logger.getLogger("io.quarkiverse.shim");
 
-    public void logApplied(List<String> descriptions) {
+    private ShimStartupLog() {
+    }
+
+    public static void logApplied(List<String> descriptions) {
         if (descriptions.isEmpty()) {
             return;
         }
@@ -30,7 +29,7 @@ public class ShimRecorder {
      * is absent, or its version falls outside {@code versions()} — so an
      * obsolete patch does not go unnoticed after an upgrade.
      */
-    public void logRetired(List<String> descriptions) {
+    public static void logRetired(List<String> descriptions) {
         if (descriptions.isEmpty()) {
             return;
         }

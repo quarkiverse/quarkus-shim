@@ -29,13 +29,12 @@ import org.objectweb.asm.util.CheckClassAdapter;
 import org.objectweb.asm.util.TraceClassVisitor;
 
 import io.quarkiverse.shim.AnnotationConflict;
-import io.quarkiverse.shim.ShimRecorder;
 import io.quarkiverse.shim.VersionMismatch;
+import io.quarkiverse.shim.runtime.ShimStartupLog;
+import io.quarkus.core.deployment.service.ServiceRegistrar;
 import io.quarkus.deployment.IsDevelopment;
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
-import io.quarkus.deployment.annotations.ExecutionTime;
-import io.quarkus.deployment.annotations.Record;
 import io.quarkus.deployment.builditem.ApplicationArchivesBuildItem;
 import io.quarkus.deployment.builditem.BytecodeTransformerBuildItem;
 import io.quarkus.deployment.builditem.CombinedIndexBuildItem;
@@ -271,10 +270,19 @@ public class ShimProcessor {
     }
 
     @BuildStep
-    @Record(ExecutionTime.RUNTIME_INIT)
-    void logAppliedAtStartup(ShimRecorder recorder, AppliedShimsBuildItem applied) {
-        recorder.logApplied(applied.getDescriptions());
-        recorder.logRetired(applied.getRetiredDescriptions());
+    void logAppliedAtStartup(ServiceRegistrar serviceRegistrar, AppliedShimsBuildItem applied) {
+        // captured by the service : immutable copies
+        List<String> appliedDescriptions = List.copyOf(applied.getDescriptions());
+        List<String> retiredDescriptions = List.copyOf(applied.getRetiredDescriptions());
+        if (appliedDescriptions.isEmpty() && retiredDescriptions.isEmpty()) {
+            return;
+        }
+        serviceRegistrar
+                .forService("io.quarkiverse.shim.startup-log")
+                .onStart(ctx -> {
+                    ShimStartupLog.logApplied(appliedDescriptions);
+                    ShimStartupLog.logRetired(retiredDescriptions);
+                });
     }
 
     @BuildStep(onlyIf = IsDevelopment.class)

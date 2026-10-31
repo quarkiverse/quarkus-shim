@@ -42,7 +42,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        java: [17, 21]
+        java: [21, 25]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Prepare git
@@ -61,5 +61,5 @@ jobs:
         run: mvn -B clean install -Dno-format
 
       - name: Build with Maven (Native)
-        if: matrix.java == 17
+        if: matrix.java == 21
         run: mvn -B install -Dno-format -Dnative -Dquarkus.native.container-build -Dnative.surefire.skip
