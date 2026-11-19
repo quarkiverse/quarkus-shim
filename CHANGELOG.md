@@ -2,10 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## 1.0.0 - 2026-11-19
 
 ### Changed
 
+- The extension is now stable.
 - Quarkus 4: built with Quarkus 4.0.0, needs Quarkus 4.0.0.Beta2 or later (the first Quarkus 4 release with the services API), and
   needs Java 21 or later. The applied shims are logged at startup by a service
   (`ServiceRegistrar`) instead of a bytecode recorder: `io.quarkiverse.shim.ShimRecorder` is
